@@ -12,6 +12,14 @@ PROJECT_PATH = ROOT / "HermesMobile.xcodeproj/project.pbxproj"
 SCHEME_PATH = ROOT / "HermesMobile.xcodeproj/xcshareddata/xcschemes/HermexWatchApp.xcscheme"
 IOS_SCHEME_PATH = ROOT / "HermesMobile.xcodeproj/xcshareddata/xcschemes/HermesMobile.xcscheme"
 FIXTURE_PATH = Path(__file__).parent / "fixtures/pre-watch-project.json"
+WATCH_SHARED_PATH = "Packages/WatchShared"
+WATCH_SHARED_TARGETS = {
+    "HermesMobile",
+    "HermesMobileTests",
+    "HermexWatchApp",
+    "HermexWatchWidget",
+    "HermexWatchAppTests",
+}
 
 
 def load_project():
@@ -61,13 +69,63 @@ class WatchProjectStructureTests(unittest.TestCase):
             paths.append(self.objects[file_ref]["path"])
         return paths
 
+    def watch_shared_product_id(self):
+        package_refs = [
+            ref
+            for ref in self.root.get("packageReferences", [])
+            if self.objects[ref].get("relativePath") == WATCH_SHARED_PATH
+        ]
+        self.assertEqual(len(package_refs), 1)
+        products = [
+            object_id
+            for object_id, value in self.objects.items()
+            if value.get("isa") == "XCSwiftPackageProductDependency"
+            and value.get("productName") == "WatchShared"
+            and value.get("package") == package_refs[0]
+        ]
+        self.assertEqual(len(products), 1)
+        return products[0]
+
+    def assert_preserved_dependencies_with_authorized_watch_shared_addition(
+        self, target_name, actual_dependencies, expected_dependencies, watch_shared_product
+    ):
+        expected = list(expected_dependencies)
+        if target_name in WATCH_SHARED_TARGETS:
+            expected.append(watch_shared_product)
+        self.assertEqual(actual_dependencies, expected)
+
+    def assert_preserved_phase_files_with_authorized_watch_shared_addition(
+        self, target_name, actual_phase, expected_phase, watch_shared_product
+    ):
+        actual_files = actual_phase.get("files", [])
+        if expected_phase["isa"] != "PBXFrameworksBuildPhase" or target_name not in WATCH_SHARED_TARGETS:
+            self.assertEqual(actual_files, expected_phase["files"])
+            return
+
+        watch_shared_build_files = [
+            build_file_id
+            for build_file_id in actual_files
+            if self.objects[build_file_id].get("productRef") == watch_shared_product
+        ]
+        self.assertEqual(len(watch_shared_build_files), 1)
+        self.assertEqual(
+            [item for item in actual_files if item not in watch_shared_build_files],
+            expected_phase["files"],
+        )
+
     def test_existing_target_configuration_and_memberships_are_preserved(self):
+        watch_shared_product = self.watch_shared_product_id()
         for expected in self.fixture["targets"]:
             target_id, actual = self.targets[expected["name"]]
             self.assertEqual(target_id, expected["id"])
             self.assertEqual(actual["productType"], expected["productType"])
             self.assertEqual(actual["productReference"], expected["productReference"])
-            self.assertEqual(actual.get("packageProductDependencies", []), expected["packageProductDependencies"])
+            self.assert_preserved_dependencies_with_authorized_watch_shared_addition(
+                expected["name"],
+                actual.get("packageProductDependencies", []),
+                expected["packageProductDependencies"],
+                watch_shared_product,
+            )
             actual_configs = self.configurations(actual)
             for config in expected["configurations"]:
                 self.assertEqual(actual_configs[config["name"]].get("baseConfigurationReference"), config["baseConfigurationReference"])
@@ -76,7 +134,9 @@ class WatchProjectStructureTests(unittest.TestCase):
             for phase in old_phases:
                 actual_phase = self.objects[phase["id"]]
                 self.assertEqual(actual_phase["isa"], phase["isa"])
-                self.assertEqual(actual_phase.get("files", []), phase["files"])
+                self.assert_preserved_phase_files_with_authorized_watch_shared_addition(
+                    expected["name"], actual_phase, phase, watch_shared_product
+                )
                 self.assertEqual(actual_phase.get("dstPath"), phase["dstPath"])
                 self.assertEqual(actual_phase.get("dstSubfolderSpec"), phase["dstSubfolderSpec"])
                 self.assertEqual(actual_phase.get("name"), phase["name"])
@@ -91,8 +151,10 @@ class WatchProjectStructureTests(unittest.TestCase):
             self.fixture["package_references"],
         )
         added_packages = self.root.get("packageReferences", [])[len(self.fixture["package_references"]):]
-        self.assertEqual(len(added_packages), 1)
-        self.assertEqual(self.objects[added_packages[0]]["relativePath"], "Packages/HermexWatchRoot")
+        self.assertEqual(
+            [self.objects[package_id]["relativePath"] for package_id in added_packages],
+            ["Packages/HermexWatchRoot", WATCH_SHARED_PATH],
+        )
         old_main_children = set(self.fixture["main_group_children"])
         self.assertEqual(
             [item for item in self.objects[self.root["mainGroup"]]["children"] if item in old_main_children],
@@ -104,6 +166,28 @@ class WatchProjectStructureTests(unittest.TestCase):
             self.fixture["product_group_children"],
         )
         self.assertEqual(hashlib.sha256(IOS_SCHEME_PATH.read_bytes()).hexdigest(), self.fixture["scheme_sha256"])
+
+    def test_legacy_dependency_preservation_rejects_unrelated_dependency_drift(self):
+        watch_shared_product = "WATCH_SHARED"
+        original = ["EXISTING_A", "EXISTING_B"]
+
+        self.assert_preserved_dependencies_with_authorized_watch_shared_addition(
+            "HermesMobile", original + [watch_shared_product], original, watch_shared_product
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_preserved_dependencies_with_authorized_watch_shared_addition(
+                "HermesMobile",
+                original + ["UNRELATED", watch_shared_product],
+                original,
+                watch_shared_product,
+            )
+        with self.assertRaises(AssertionError):
+            self.assert_preserved_dependencies_with_authorized_watch_shared_addition(
+                "HermesShareExtension",
+                original + [watch_shared_product],
+                original,
+                watch_shared_product,
+            )
 
     def test_modern_watch_target_graph_and_settings(self):
         self.assertEqual(len(self.targets), 8)

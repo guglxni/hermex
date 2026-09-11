@@ -25,7 +25,7 @@ public enum DirectAccessState: String, Hashable, Codable, Sendable { case notCon
 public enum SessionCollection: String, Hashable, Codable, Sendable { case current, archived }
 public enum WatchMessageRole: String, Hashable, Codable, Sendable { case user, assistant, system }
 public enum WatchRunPhase: String, Hashable, Codable, Sendable { case starting, thinking, tool, searching, files, command, responding, attention, completed, failed, stopped, unknown }
-public enum ApprovalChoice: String, Hashable, Codable, Sendable { case once, session, always, deny }
+public enum ApprovalChoice: String, Hashable, Codable, CaseIterable, Sendable { case once, session, always, deny }
 public enum TaskControl: String, Hashable, Codable, Sendable { case run, pause, resume }
 public enum GitDiffKind: String, Hashable, Codable, Sendable { case workingTree, staged }
 public enum BotPhoneDestination: String, Hashable, Codable, Sendable { case conversation, activity, historyUnavailable }

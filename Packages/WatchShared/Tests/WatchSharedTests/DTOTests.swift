@@ -5,6 +5,15 @@ import Testing
 @Suite struct DTOTests {
     private func scope() throws -> ServerScope { ServerScope(epoch: InstallationEpoch(rawValue: UUID()), server: ServerID(rawValue: UUID()), generation: try Generation(1)) }
 
+    @Test func approvalChoicePreservesIterableCodableWireContract() throws {
+        func requireCaseIterable<T: CaseIterable>(_: T.Type) {}
+        requireCaseIterable(ApprovalChoice.self)
+
+        let choices = ApprovalChoice.allCases
+        #expect(choices.map(\.rawValue) == ["once", "session", "always", "deny"])
+        #expect(try JSONDecoder().decode([ApprovalChoice].self, from: JSONEncoder().encode(choices)) == choices)
+    }
+
     @Test func boundedContainersAndPageRequestsValidateAtInitAndDecode() throws {
         #expect(throws: (any Error).self) { try PageRequest(continuation: nil, limit: 0) }
         let page = try BoundedPage(items: [1, 2], continuation: "next", isTruncated: true, maximumItems: 2)
