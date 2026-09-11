@@ -3,6 +3,10 @@ import Foundation
 public enum RouteValidationError: Error, Equatable, Sendable {
     case tooLarge
     case unsupportedSchema(Int)
+    case invalidDates
+    case scopeMismatch
+    case incompatibleDestination
+    case invalidRequestID
 }
 
 public enum RedactedRoute: Hashable, Sendable {
@@ -92,3 +96,18 @@ public struct CacheKey: Hashable, Sendable {
         return Self(encoded: try encoder.encode(value))
     }
 }
+
+public enum SessionPhoneDestination:String,Hashable,Codable,Sendable{case detail,management,attachments}
+public enum TaskPhoneDestination:String,Hashable,Codable,Sendable{case detail,edit,create,schedule,delivery,profile,model,skills}
+public enum SkillPhoneDestination:String,Hashable,Codable,Sendable{case detail,install,edit,configure,enablement}
+public enum MemoryPhoneDestination:String,Hashable,Codable,Sendable{case detail,create,edit,delete,bulk}
+public enum InsightPhoneDestination:String,Hashable,Codable,Sendable{case detail,generate,configure}
+public enum WorkspacePhoneDestination:String,Hashable,Codable,Sendable{case browse,write,upload,download}
+public enum GitPhoneDestination:String,Hashable,Codable,Sendable{case browse,checkout,fetch,pull,push,stage,unstage,discard,commit,merge,resolveConflicts}
+public enum SettingsPhoneDestination:String,Hashable,Codable,Sendable{case watchSharing,directAccess,bot}
+public enum WatchRouteTarget:Hashable,Codable,Sendable{
+ case home;case sessions(collection:SessionCollection);case newSession(draftHandle:DraftHandle?);case session(SessionKey,destination:SessionPhoneDestination);case run(RunKey);case approval(ApprovalKey);case clarification(ClarificationKey,draftHandle:DraftHandle?);case task(TaskKey?,destination:TaskPhoneDestination);case taskRun(TaskKey,runID:String);case skill(SkillKey?,destination:SkillPhoneDestination);case memory(MemoryKey?,destination:MemoryPhoneDestination);case insight(InsightKey?,destination:InsightPhoneDestination);case workspace(SessionKey,pathHandle:PathHandle?,destination:WorkspacePhoneDestination);case git(SessionKey,pathHandle:PathHandle?,diffKind:GitDiffKind?,destination:GitPhoneDestination);case diagnostics(ServerScope);case settings(ServerScope,destination:SettingsPhoneDestination);case bot(BotKey,destination:BotPhoneDestination,requestID:String?)
+ fileprivate var nestedScope:ServerScope?{switch self{case .home,.sessions,.newSession:return nil;case .session(let k,_),.workspace(let k,_,_),.git(let k,_,_,_):return k.scope;case .run(let k):return k.session.scope;case .approval(let k):return k.session.scope;case .clarification(let k,_):return k.session.scope;case .task(let k,_):return k?.scope;case .taskRun(let k,_):return k.scope;case .skill(let k,_):return k?.scope;case .memory(let k,_):return k?.scope;case .insight(let k,_):return k?.scope;case .diagnostics(let s),.settings(let s,_):return s;case .bot(let k,_,_):return k.scope}}
+ fileprivate func validate()throws{switch self{case .bot(_,let destination,let requestID):if destination != .activity,requestID != nil{throw RouteValidationError.incompatibleDestination};if let requestID{guard !requestID.allSatisfy(\.isWhitespace),requestID.utf8.count<=256 else{throw RouteValidationError.invalidRequestID}};case .task(nil,let d) where d != .create:throw RouteValidationError.incompatibleDestination;default:break}}
+}
+public struct WatchHandoffRoute:Hashable,Codable,Sendable{public let schemaVersion:UInt16;public let routeID:UUID;public let scope:ServerScope;public let target:WatchRouteTarget;public let createdAt:Date;public let expiresAt:Date;public init(routeID:UUID,scope:ServerScope,target:WatchRouteTarget,createdAt:Date,expiresAt:Date)throws{guard createdAt.timeIntervalSinceReferenceDate.isFinite,expiresAt.timeIntervalSinceReferenceDate.isFinite,createdAt<expiresAt,expiresAt.timeIntervalSince(createdAt)<=300 else{throw RouteValidationError.invalidDates};if let nested=target.nestedScope, nested != scope{throw RouteValidationError.scopeMismatch};try target.validate();self.schemaVersion=1;self.routeID=routeID;self.scope=scope;self.target=target;self.createdAt=createdAt;self.expiresAt=expiresAt};private enum CodingKeys:String,CodingKey{case schemaVersion,routeID,scope,target,createdAt,expiresAt};public init(from decoder:Decoder)throws{let c=try decoder.container(keyedBy:CodingKeys.self);let schema=try c.decode(UInt16.self,forKey:.schemaVersion);guard schema==1 else{throw RouteValidationError.unsupportedSchema(Int(schema))};try self.init(routeID:c.decode(UUID.self,forKey:.routeID),scope:c.decode(ServerScope.self,forKey:.scope),target:c.decode(WatchRouteTarget.self,forKey:.target),createdAt:c.decode(Date.self,forKey:.createdAt),expiresAt:c.decode(Date.self,forKey:.expiresAt))};public func canonicalJSONData()throws->Data{let e=JSONEncoder();e.outputFormatting=[.sortedKeys];let data=try e.encode(self);guard data.count<=ContractLimits.routeJSONBytes else{throw RouteValidationError.tooLarge};return data};public static func decode(_ data:Data)throws->Self{guard data.count<=ContractLimits.routeJSONBytes else{throw RouteValidationError.tooLarge};return try JSONDecoder().decode(Self.self,from:data)}}

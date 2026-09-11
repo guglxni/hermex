@@ -151,4 +151,24 @@ import Testing
             try JSONDecoder().decode(BotKey.self, from: invalid)
         }
     }
+
+    @Test func extendedIdentityTypesAreDistinctValidatedAndRoundTrip() throws {
+        let scope = ServerScope(epoch: InstallationEpoch(rawValue: UUID()), server: ServerID(rawValue: UUID()), generation: try Generation(1))
+        let session = try SessionKey(scope: scope, sessionID: "session")
+        let values: [any Codable & Sendable] = [
+            try RunKey(session: session, streamID: "stream"),
+            try TaskKey(scope: scope, jobID: "job"),
+            try ApprovalKey(session: session, remoteID: "approval"),
+            try ClarificationKey(session: session, remoteID: "clarification"),
+            try ProfileID("profile"), try WorkspaceHandle("workspace"), try PathHandle("path-handle"),
+            try MediaHandle("media"), DraftHandle(rawValue: UUID()), try OriginBinding(digest: "sha256:abc"),
+            try SkillKey(scope: scope, name: "skill"), try MemoryKey(scope: scope, remoteID: "memory"),
+            try InsightKey(scope: scope, remoteID: "insight")
+        ]
+        #expect(values.count == 13)
+        let run = try RunKey(session: session, streamID: "stream")
+        #expect(try JSONDecoder().decode(RunKey.self, from: JSONEncoder().encode(run)) == run)
+        #expect(throws: IdentityValidationError.blankIdentifier) { try ProfileID(" \n") }
+        #expect(throws: IdentityValidationError.identifierTooLong(maxUTF8Bytes: 256)) { try PathHandle(String(repeating: "é", count: 129)) }
+    }
 }
