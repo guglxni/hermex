@@ -172,3 +172,10 @@ import Testing
         #expect(throws: IdentityValidationError.identifierTooLong(maxUTF8Bytes: 256)) { try PathHandle(String(repeating: "é", count: 129)) }
     }
 }
+
+@Suite struct ManifestCoverage_IdentityTests {
+ @Test func executableTypedManifestCoverage() {
+  func requireType<T>(_: T.Type) {}
+  requireType(ContractLimits.self)
+ }
+}

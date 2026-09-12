@@ -8,13 +8,15 @@ public protocol WatchCompanionServicing:Sendable{
  func send(text:String,to key:SessionKey,context:CommandContext)async->CommandReceipt<RunKey>
  func events(for run:RunKey,afterEventID:String?)->AsyncThrowingStream<WatchRunEvent,Error>
  func reconcile(run:RunKey)async throws->ScopedSnapshot<WatchRunState>
- func stop(run:RunKey,context:CommandContext)async->CommandReceipt<EmptyValue>
+ func stop(run:RunKey,context:CommandContext)async throws->CommandReceipt<EmptyValue>
  func pendingApprovalHead(session:SessionKey)async throws->ScopedSnapshot<WatchAttentionHead<WatchApproval>>
  func pendingClarificationHead(session:SessionKey)async throws->ScopedSnapshot<WatchAttentionHead<WatchClarification>>
+ func respond(approval:ApprovalKey,choice:ApprovalChoice,context:CommandContext)async->CommandReceipt<EmptyValue>
+ func respond(clarification:ClarificationKey,answer:String,context:CommandContext)async->CommandReceipt<EmptyValue>
  func tasks(scope:ServerScope,localLimit:Int)async throws->ScopedSnapshot<BoundedCollection<WatchTaskSummary>>
  func taskRuns(key:TaskKey,page:PageRequest)async throws->ScopedSnapshot<BoundedPage<WatchTaskRun>>
  func taskRunDetail(key:TaskKey,runID:String)async throws->ScopedSnapshot<WatchTaskRunDetail>
- func controlTask(key:TaskKey,action:TaskControl,context:CommandContext)async->CommandReceipt<EmptyValue>
+ func controlTask(key:TaskKey,action:TaskControl,context:CommandContext)async throws->CommandReceipt<EmptyValue>
  func skills(scope:ServerScope,query:String?,localLimit:Int)async throws->ScopedSnapshot<BoundedCollection<WatchSkillSummary>>
  func skillDetail(key:SkillKey)async throws->ScopedSnapshot<WatchSkillDetail>
  func skillContent(key:SkillKey,fileHandle:PathHandle?)async throws->ScopedSnapshot<WatchSkillContent>
@@ -28,6 +30,15 @@ public protocol WatchCompanionServicing:Sendable{
  func bots(scope:ServerScope)async throws->ScopedSnapshot<[WatchBotSummary]>
  func botConversation(key:BotKey)async throws->ScopedSnapshot<WatchBotConversation>
  func botEvents(for key:BotKey,replayEpoch:String?,afterSequence:Int?)->AsyncThrowingStream<WatchBotEvent,Error>
- func sendBot(text:String,to key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
- func interruptBot(key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
+ func sendBot(text:String,to key:BotKey,context:CommandContext)async throws->CommandReceipt<EmptyValue>
+ func interruptBot(key:BotKey,context:CommandContext)async throws->CommandReceipt<EmptyValue>
+}
+
+public extension WatchCompanionServicing {
+ func respond(approval:ApprovalKey,choice:ApprovalChoice,context:CommandContext)async->CommandReceipt<EmptyValue>{currentPinAttentionRejection(context:context,operationKind:.respondApproval)}
+ func respond(clarification:ClarificationKey,answer:String,context:CommandContext)async->CommandReceipt<EmptyValue>{currentPinAttentionRejection(context:context,operationKind:.respondClarification)}
+ private func currentPinAttentionRejection(context:CommandContext,operationKind:WatchOperationKind)->CommandReceipt<EmptyValue>{
+  let receipt=try! MutationReceipt(context:context,operationKind:operationKind,phase:.rejected,updatedAt:context.createdAt,nonSecretResultID:"attentionExactIDUnavailable")
+  return CommandReceipt(receipt:receipt,value:nil)
+ }
 }

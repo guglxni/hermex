@@ -128,3 +128,10 @@ import Testing
         #expect(fence == before)
     }
 }
+
+@Suite struct ManifestCoverage_ScopeFenceTests {
+ @Test func executableTypedManifestCoverage() {
+  func requireType<T>(_: T.Type) {}
+  requireType(ScopeDecision.self)
+ }
+}

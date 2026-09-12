@@ -36,12 +36,31 @@ import Testing
         #expect(try JSONDecoder().decode(WatchBotClarificationProjection.self, from: JSONEncoder().encode(clarification)) == clarification)
     }
 
-    @Test func mediaAndDiagnosticsAdjacentDTOsEnforceScopeDatesAndSize() throws {
+    private func replacing<T: Encodable>(_ value: T, _ key: String, with replacement: Any) throws -> Data {
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+        object[key] = replacement
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
+    @Test func mediaDescriptorMalformedEncodedFixtureReentersValidation() throws {
         let scope = try scope(); let session = try SessionKey(scope: scope, sessionID: "s")
         let observed = Date(timeIntervalSinceReferenceDate: 100), expires = Date(timeIntervalSinceReferenceDate: 200)
         let descriptor = try WatchMediaDescriptor(scope: scope, session: session, origin: OriginBinding(digest: "sha256:origin"), handle: MediaHandle("m"), mimeType: "image/png", byteSize: 4, sha256: String(repeating: "a", count: 64), observedAt: observed, expiresAt: expires)
         #expect(try WatchMediaPayload(descriptor: descriptor, bytes: Data([1,2,3,4])).bytes.count == 4)
         #expect(throws: (any Error).self) { try WatchMediaPayload(descriptor: descriptor, bytes: Data([1])) }
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchMediaDescriptor.self, from: replacing(descriptor, "byteSize", with: 1_048_577)) }
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchMediaDescriptor.self, from: replacing(descriptor, "sha256", with: "bad")) }
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchMediaDescriptor.self, from: replacing(descriptor, "expiresAt", with: observed.timeIntervalSinceReferenceDate)) }
+    }
+
+    @Test func alertProjectionMalformedEncodedFixtureReentersValidation() throws {
+        let alertScope = try scope(), now = Date(timeIntervalSinceReferenceDate: 100)
+        let alert = try WatchAlertProjection(scope: alertScope, alertID: UUID(), kind: .serverDisconnected, dedupeKey: "dedupe", source: .brokerSnapshot, observedAt: now, expiresAt: now.addingTimeInterval(60), route: .diagnostics(alertScope), genericTitleCode: "title", genericBodyCode: "body")
+        #expect(try JSONDecoder().decode(WatchAlertProjection.self, from: JSONEncoder().encode(alert)) == alert)
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchAlertProjection.self, from: replacing(alert, "dedupeKey", with: " ")) }
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchAlertProjection.self, from: replacing(alert, "expiresAt", with: now.timeIntervalSinceReferenceDate)) }
+        let other = try scope()
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchAlertProjection.self, from: replacing(alert, "route", with: try JSONSerialization.jsonObject(with: JSONEncoder().encode(WatchAlertRoute.diagnostics(other))))) }
     }
 
     @Test func allDTOFamiliesArePublicCodableSendableHashable() throws {
@@ -51,4 +70,35 @@ import Testing
         require(WatchSkillDetail.self); require(WatchMemoryDocument.self); require(WatchInsightsAggregate.self); require(WatchWorkspaceEntry.self)
         require(WatchGitAggregate.self); require(WatchBotConversation.self); require(WatchAlertProjection.self)
     }
+}
+
+@Suite struct ManifestCoverage_DTOTests {
+ @Test func executableTypedManifestCoverage() {
+  func requireType<T>(_: T.Type) {}
+  requireType(AlertKind.self)
+  requireType(AlertSource.self)
+  requireType(BotPhoneDestination.self)
+  requireType(DirectAccessState.self)
+  requireType(GitDiffKind.self)
+  requireType(SessionCollection.self)
+  requireType(TaskControl.self)
+  requireType(WatchAttentionHead<WatchApproval>.self)
+  requireType(WatchAuthMode.self)
+  requireType(WatchBotActivity.self)
+  requireType(WatchBotClarificationForm.self)
+  requireType(WatchBotClarificationQuestion.self)
+  requireType(WatchBotEvent.self)
+  requireType(WatchBotHistoryAvailability.self)
+  requireType(WatchBotSummary.self)
+  requireType(WatchFilePreview.self)
+  requireType(WatchMemorySection.self)
+  requireType(WatchMessageRole.self)
+  requireType(WatchRunPhase.self)
+  requireType(WatchRunState.self)
+  requireType(WatchSkillContent.self)
+  requireType(WatchSkillSummary.self)
+  requireType(WatchTaskRun.self)
+  requireType(WatchTaskRunDetail.self)
+  requireType(WatchTranscriptBlock.self)
+ }
 }
