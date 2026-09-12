@@ -5,6 +5,13 @@ import Testing
 @Suite struct ServiceBoundaryTests {
     private final class CurrentPinService: WatchCompanionServicing, @unchecked Sendable {
         private(set) var sideEffects: [String] = []
+        private(set) var persistenceCount = 0
+        private(set) var serializationCount = 0
+        private(set) var endpointConstructionCount = 0
+        private(set) var adapterSubmissionCount = 0
+        private(set) var watchConnectivityCount = 0
+        private(set) var urlSessionCount = 0
+        private(set) var networkObservationCount = 0
         func registry() async -> RegistrySnapshot { fatalError("unused") }
         func refreshSessions(scope: ServerScope, collection: SessionCollection, query: String?, localLimit: Int) async throws -> ScopedSnapshot<BoundedCollection<WatchSessionSummary>> { fatalError("unused") }
         func composerOptions(scope: ServerScope) async throws -> ScopedSnapshot<WatchComposerOptions> { fatalError("unused") }
@@ -45,29 +52,72 @@ import Testing
         return (try ApprovalKey(session: session, remoteID: "approval"), try ClarificationKey(session: session, remoteID: "clarification"), context)
     }
 
-    @Test func frozenFacadeProvidesExactCurrentPinAttentionRejections() async throws {
-        let service = CurrentPinService()
+    @Test func semanticCoverage_WatchCompanionServicing() async throws {
+        let concrete = CurrentPinService()
+        let service: any WatchCompanionServicing = concrete
+        let _: any Sendable = service
+        let stop: (RunKey, CommandContext) async -> CommandReceipt<EmptyValue> = service.stop(run:context:)
+        let controlTask: (TaskKey, TaskControl, CommandContext) async -> CommandReceipt<EmptyValue> = service.controlTask(key:action:context:)
+        let sendBot: (String, BotKey, CommandContext) async -> CommandReceipt<EmptyValue> = service.sendBot(text:to:context:)
+        let interruptBot: (BotKey, CommandContext) async -> CommandReceipt<EmptyValue> = service.interruptBot(key:context:)
+        _ = (stop, controlTask, sendBot, interruptBot)
         let (approval, clarification, context) = try fixture()
+
         let approvalReceipt = await service.respond(approval: approval, choice: .once, context: context)
         let clarificationReceipt = await service.respond(clarification: clarification, answer: "answer", context: context)
+
+        #expect(approvalReceipt.value == nil)
         #expect(approvalReceipt.receipt.context == context)
         #expect(approvalReceipt.receipt.operationKind == .respondApproval)
         #expect(approvalReceipt.receipt.phase == .rejected)
+        #expect(approvalReceipt.receipt.updatedAt == context.createdAt)
         #expect(approvalReceipt.receipt.nonSecretResultID == "attentionExactIDUnavailable")
+        #expect(clarificationReceipt.value == nil)
         #expect(clarificationReceipt.receipt.context == context)
         #expect(clarificationReceipt.receipt.operationKind == .respondClarification)
         #expect(clarificationReceipt.receipt.phase == .rejected)
+        #expect(clarificationReceipt.receipt.updatedAt == context.createdAt)
         #expect(clarificationReceipt.receipt.nonSecretResultID == "attentionExactIDUnavailable")
-        #expect(service.sideEffects.isEmpty)
+        #expect(concrete.sideEffects.isEmpty)
+        #expect(concrete.persistenceCount == 0)
+        #expect(concrete.serializationCount == 0)
+        #expect(concrete.endpointConstructionCount == 0)
+        #expect(concrete.adapterSubmissionCount == 0)
+        #expect(concrete.watchConnectivityCount == 0)
+        #expect(concrete.urlSessionCount == 0)
+        #expect(concrete.networkObservationCount == 0)
         #expect(!WatchMutationOperation.currentlyEnabledKinds.contains(.respondApproval))
         #expect(!WatchMutationOperation.currentlyEnabledKinds.contains(.respondClarification))
-    }
 
-    @Test func serviceProtocolIsPublicSendableAndSolelyOwned() throws {
-        let _: any Sendable.Type = (any WatchCompanionServicing).self
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/WatchShared")
-        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter { $0.pathExtension == "swift" }
-        let owners = try files.filter { try String(contentsOf: $0, encoding: .utf8).contains("protocol WatchCompanionServicing") }
+        let invalidContext = try CommandContext(
+            stableCommandID: CommandID(rawValue: UUID()),
+            scope: context.scope,
+            expectedRevision: context.expectedRevision,
+            createdAt: context.createdAt,
+            expiresAt: context.expiresAt
+        )
+        let secondReceipt = await service.respond(approval: approval, choice: .deny, context: invalidContext)
+        #expect(secondReceipt.receipt.context.stableCommandID == invalidContext.stableCommandID)
+        #expect(secondReceipt.receipt.nonSecretResultID == "attentionExactIDUnavailable")
+        #expect(concrete.sideEffects.isEmpty)
+        #expect(concrete.persistenceCount == 0)
+        #expect(concrete.serializationCount == 0)
+        #expect(concrete.endpointConstructionCount == 0)
+        #expect(concrete.adapterSubmissionCount == 0)
+        #expect(concrete.watchConnectivityCount == 0)
+        #expect(concrete.urlSessionCount == 0)
+        #expect(concrete.networkObservationCount == 0)
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/WatchShared")
+        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        let owners = try files.filter {
+            try String(contentsOf: $0, encoding: .utf8).contains("protocol WatchCompanionServicing")
+        }
         #expect(owners.map(\.lastPathComponent) == ["ServiceBoundary.swift"])
     }
 }

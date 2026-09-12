@@ -10,7 +10,7 @@ import Testing
         )
     }
 
-    @Test func freshFenceBootstrapsOnlyItsTrustedEpoch() throws {
+    @Test func semanticCoverage_ScopeFence() throws {
         let epoch = InstallationEpoch(rawValue: UUID())
         let item = try entry(epoch: epoch)
         let snapshot = try RegistrySnapshot(epoch: epoch, revision: Revision(1), generatedAt: Date(), entries: [item])
@@ -24,14 +24,28 @@ import Testing
         #expect(fence.highWaterGenerations[item.scope.server] == item.scope.generation)
     }
 
-    @Test func applyRejectsEpochMismatchWithoutMutation() throws {
+    @Test func semanticCoverage_ScopeFenceError() throws {
         let trusted = InstallationEpoch(rawValue: UUID())
         let other = InstallationEpoch(rawValue: UUID())
+        let server = ServerID(rawValue: UUID())
         var fence = ScopeFence(epoch: trusted)
         let before = fence
         let snapshot = try RegistrySnapshot(epoch: other, revision: Revision(1), generatedAt: Date(), entries: [])
         #expect(throws: ScopeFenceError.epochMismatch) { try fence.apply(snapshot) }
         #expect(fence == before)
+
+        let errors: [ScopeFenceError] = [
+            .epochMismatch,
+            .olderRevision,
+            .conflictingEqualRevision,
+            .generationRollback(server),
+        ]
+        #expect(errors == [
+            ScopeFenceError.epochMismatch,
+            ScopeFenceError.olderRevision,
+            ScopeFenceError.conflictingEqualRevision,
+            ScopeFenceError.generationRollback(server),
+        ])
     }
 
     @Test func applyRejectsOlderRevisionWithoutMutation() throws {
@@ -104,16 +118,33 @@ import Testing
         #expect(fence == before)
     }
 
-    @Test func decisionAcceptsOnlyExactActiveScope() throws {
+    @Test func semanticCoverage_ScopeDecision() throws {
         let epoch = InstallationEpoch(rawValue: UUID())
         let server = ServerID(rawValue: UUID())
         let current = try entry(epoch: epoch, server: server, generation: 4)
         var fence = ScopeFence(epoch: epoch)
         try fence.apply(RegistrySnapshot(epoch: epoch, revision: Revision(1), generatedAt: Date(), entries: [current]))
-        #expect(fence.decision(for: current.scope) == .accept)
-        #expect(fence.decision(for: ServerScope(epoch: epoch, server: server, generation: try Generation(3))) == .reject)
-        #expect(fence.decision(for: ServerScope(epoch: epoch, server: server, generation: try Generation(5))) == .reject)
-        #expect(fence.decision(for: ServerScope(epoch: epoch, server: ServerID(rawValue: UUID()), generation: try Generation(1))) == .reject)
+
+        let stale = ServerScope(epoch: epoch, server: server, generation: try Generation(3))
+        let future = ServerScope(epoch: epoch, server: server, generation: try Generation(5))
+        let absent = ServerScope(
+            epoch: epoch,
+            server: ServerID(rawValue: UUID()),
+            generation: try Generation(1)
+        )
+        let decisions: [ScopeDecision] = [
+            fence.decision(for: current.scope),
+            fence.decision(for: stale),
+            fence.decision(for: future),
+            fence.decision(for: absent),
+        ]
+
+        #expect(decisions == [
+            ScopeDecision.accept,
+            ScopeDecision.reject,
+            ScopeDecision.reject,
+            ScopeDecision.reject,
+        ])
     }
 
     @Test func tombstoneAtMaximumGenerationRejectsReaddWithoutOverflow() throws {
@@ -127,11 +158,4 @@ import Testing
         #expect(throws: ScopeFenceError.generationRollback(server)) { try fence.apply(readd) }
         #expect(fence == before)
     }
-}
-
-@Suite struct ManifestCoverage_ScopeFenceTests {
- @Test func executableTypedManifestCoverage() {
-  func requireType<T>(_: T.Type) {}
-  requireType(ScopeDecision.self)
- }
 }

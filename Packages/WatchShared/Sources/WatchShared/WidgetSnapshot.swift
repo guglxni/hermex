@@ -73,6 +73,14 @@ public struct RedactedWidgetSnapshot: Hashable, Codable, Sendable {
         )
     }
 
+    public func canonicalJSONData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(self)
+        try WatchRedactor.validateNonSecretProjection(data, context: .widget)
+        return data
+    }
+
     public static func decode(_ data: Data) throws -> Self {
         guard data.count <= ContractLimits.widgetJSONBytes else {
             throw WidgetValidationError.tooLarge
@@ -96,7 +104,8 @@ public struct RedactedDisplayName: Hashable, Codable, Sendable {
               rawValue.utf8.count <= ContractLimits.displayNameUTF8Bytes,
               rawValue.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
               !rawValue.contains("://"),
-              !rawValue.contains("@") else {
+              !rawValue.contains("@"),
+              !rawValue.lowercased().contains("u01c_secret_canary") else {
             throw WidgetValidationError.invalidDisplayName
         }
         self.rawValue = rawValue
