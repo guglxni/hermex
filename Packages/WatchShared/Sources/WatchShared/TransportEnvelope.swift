@@ -126,6 +126,20 @@ public struct WatchResponseEnvelope: Hashable, Codable, Sendable {
         schemaVersion = schema; requestID = try c.decode(UUID.self, forKey: .requestID); self.scope = scope; requestOperationKind = kind; requestCreatedAt = created; requestExpiresAt = expires; commandContext = context; self.result = result
     }
     public static func decodeLive(_ data:Data)throws->Self{guard data.count<=262_144 else{throw EnvelopeValidationError.resultMismatch};return try JSONDecoder().decode(Self.self,from:data)}
-    public func validate(against request:WatchRequestEnvelope,receivedAt:Date)throws{let expected:(UUID,ServerScope,WatchOperationKind,Date,Date);switch request{case .read(_,let id,let scope,let kind,_,let created,let expires),.stream(_,let id,let scope,let kind,_,let created,let expires):expected=(id,scope,kind,created,expires)};guard receivedAt.timeIntervalSinceReferenceDate.isFinite,receivedAt<=expected.4 else{throw EnvelopeValidationError.expired};guard requestID==expected.0,scope==expected.1,requestOperationKind==expected.2,requestCreatedAt==expected.3,requestExpiresAt==expected.4,commandContext==nil else{throw EnvelopeValidationError.contextMismatch};try Self.validate(schemaVersion:schemaVersion,scope:scope,requestOperationKind:requestOperationKind,requestCreatedAt:requestCreatedAt,requestExpiresAt:requestExpiresAt,commandContext:commandContext,result:result)}
-    public func validate(against request:WatchMutationRequest,receivedAt:Date)throws{guard receivedAt.timeIntervalSinceReferenceDate.isFinite,receivedAt<=request.expiresAt else{throw EnvelopeValidationError.expired};guard requestID==request.requestID,scope==request.context.scope,requestOperationKind==request.operationKind,requestCreatedAt==request.createdAt,requestExpiresAt==request.expiresAt,commandContext==request.context else{throw EnvelopeValidationError.contextMismatch};try Self.validate(schemaVersion:schemaVersion,scope:scope,requestOperationKind:requestOperationKind,requestCreatedAt:requestCreatedAt,requestExpiresAt:requestExpiresAt,commandContext:commandContext,result:result)}
+    public func validate(against request:WatchRequestEnvelope,receivedAt:Date)throws{
+        let expected:(UUID,ServerScope,WatchOperationKind,Date,Date)
+        switch request{
+        case .read(_,let id,let scope,let kind,_,let created,let expires),.stream(_,let id,let scope,let kind,_,let created,let expires):expected=(id,scope,kind,created,expires)
+        }
+        guard receivedAt.timeIntervalSinceReferenceDate.isFinite,receivedAt<=expected.4 else{throw EnvelopeValidationError.expired}
+        guard requestID==expected.0,scope==expected.1,requestOperationKind==expected.2,requestCreatedAt==expected.3,requestExpiresAt==expected.4,commandContext==nil else{throw EnvelopeValidationError.contextMismatch}
+        try Self.validate(schemaVersion:schemaVersion,scope:scope,requestOperationKind:requestOperationKind,requestCreatedAt:requestCreatedAt,requestExpiresAt:requestExpiresAt,commandContext:commandContext,result:result)
+        switch request{case .read(_,_,_,_,let operation,_,_):try result.validate(against:operation);case .stream(_,_,_,_,let operation,_,_):try result.validate(against:operation)}
+    }
+    public func validate(against request:WatchMutationRequest,receivedAt:Date)throws{
+        guard receivedAt.timeIntervalSinceReferenceDate.isFinite,receivedAt<=request.expiresAt else{throw EnvelopeValidationError.expired}
+        guard requestID==request.requestID,scope==request.context.scope,requestOperationKind==request.operationKind,requestCreatedAt==request.createdAt,requestExpiresAt==request.expiresAt,commandContext==request.context else{throw EnvelopeValidationError.contextMismatch}
+        try Self.validate(schemaVersion:schemaVersion,scope:scope,requestOperationKind:requestOperationKind,requestCreatedAt:requestCreatedAt,requestExpiresAt:requestExpiresAt,commandContext:commandContext,result:result)
+        try result.validate(against:request.operation)
+    }
 }

@@ -43,6 +43,46 @@ public enum WatchOperationResult:Hashable,Codable,Sendable{
   case .runEvent,.botEvent,.failure:break
   }
  }
+ func validate(against operation:WatchReadOperation)throws{
+  if case .failure=self{return}
+  let matches:Bool
+  switch(operation,self){
+  case(.sessions,.sessions),(.composerOptions,.composerOptions),(.tasks,.tasks),(.skills,.skills),(.memoryDocument,.memoryDocument),(.insightsAggregate,.insightsAggregate),(.diagnostics,.diagnostics),(.bots,.bots):matches=true
+  case(.transcript(let session,_,_),.transcript(let v)):matches=v.value.session==session
+  case(.runState(let run),.runState(let v)):matches=v.value.key==run
+  case(.pendingApprovalHead(let session),.pendingApprovalHead(let v)):matches=v.value.item.map{$0.key.session==session} ?? true
+  case(.pendingClarificationHead(let session),.pendingClarificationHead(let v)):matches=v.value.item.map{$0.key.session==session} ?? true
+  case(.taskRuns(let task,_),.taskRuns(let v)):matches=v.value.items.allSatisfy{$0.task==task}
+  case(.taskRunDetail(let task,let runID),.taskRunDetail(let v)):matches=v.value.run.task==task&&v.value.run.runID==runID
+  case(.skillDetail(let skill),.skillDetail(let v)):matches=v.value.key==skill
+  case(.skillContent(let skill,let fileHandle),.skillContent(let v)):matches=v.value.key==skill&&v.value.fileHandle==fileHandle
+  case(.workspace(let session,_),.workspace(let v)):matches=v.value.items.allSatisfy{$0.session==session}
+  case(.filePreview(let session,let pathHandle),.filePreview(let v)):
+   switch v.value{case .text(let returned,_,_),.unsupported(let returned,_):matches=returned==pathHandle;case .image(let returned,let media):matches=returned==pathHandle&&media.session==session}
+  case(.gitAggregate(let session),.gitAggregate(let v)):matches=v.value.session==session
+  case(.media(let descriptor),.media(let v)):matches=v.descriptor==descriptor
+  case(.botConversation(let bot),.botConversation(let v)):matches=v.value.key==bot
+  default:matches=false
+  }
+  guard matches else{throw EnvelopeValidationError.resultMismatch}
+ }
+ func validate(against operation:WatchStreamOperation)throws{
+  if case .failure=self{return}
+  let matches:Bool
+  switch(operation,self){case(.run(let run,_),.runEvent(let event)):matches=event.key==run;case(.bot(let bot,_,_),.botEvent(let event)):matches=event.key==bot;default:matches=false}
+  guard matches else{throw EnvelopeValidationError.resultMismatch}
+ }
+ func validate(against operation:WatchMutationOperation)throws{
+  if case .failure=self{return}
+  let matches:Bool
+  switch(operation,self){
+  case(.createSession(let scope,_,_),.createdSession(let receipt)):matches=receipt.value.map{$0.scope==scope} ?? true
+  case(.send(let session,_),.startedRun(let receipt)):matches=receipt.value.map{$0.session==session} ?? true
+  case(.stop,.mutation),(.controlTask,.mutation),(.sendBot,.mutation),(.interruptBot,.mutation):matches=true
+  default:matches=false
+  }
+  guard matches else{throw EnvelopeValidationError.resultMismatch}
+ }
  public init(from decoder:Decoder)throws{let value=try WatchOperationResultWire(from:decoder).value;try value.validate();self=value}
 }
 

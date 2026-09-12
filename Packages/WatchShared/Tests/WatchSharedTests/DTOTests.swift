@@ -45,7 +45,7 @@ import Testing
     @Test func mediaDescriptorMalformedEncodedFixtureReentersValidation() throws {
         let scope = try scope(); let session = try SessionKey(scope: scope, sessionID: "s")
         let observed = Date(timeIntervalSinceReferenceDate: 100), expires = Date(timeIntervalSinceReferenceDate: 200)
-        let descriptor = try WatchMediaDescriptor(scope: scope, session: session, origin: OriginBinding(digest: "sha256:origin"), handle: MediaHandle("m"), mimeType: "image/png", byteSize: 4, sha256: String(repeating: "a", count: 64), observedAt: observed, expiresAt: expires)
+        let descriptor = try WatchMediaDescriptor(scope: scope, session: session, origin: OriginBinding(digest: "sha256:origin"), handle: MediaHandle("m"), mimeType: "image/png", byteSize: 4, sha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", observedAt: observed, expiresAt: expires)
         #expect(try WatchMediaPayload(descriptor: descriptor, bytes: Data([1,2,3,4])).bytes.count == 4)
         #expect(throws: (any Error).self) { try WatchMediaPayload(descriptor: descriptor, bytes: Data([1])) }
         #expect(throws: (any Error).self) { try JSONDecoder().decode(WatchMediaDescriptor.self, from: replacing(descriptor, "byteSize", with: 1_048_577)) }
@@ -119,15 +119,15 @@ import Testing
         return try JSONSerialization.data(withJSONObject: object)
     }
 
-    private func mediaDescriptor() throws -> WatchMediaDescriptor {
+    private func mediaDescriptor(bytes: Data = Data([1, 2, 3, 4]), sha256: String = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a") throws -> WatchMediaDescriptor {
         try WatchMediaDescriptor(
             scope: scope(),
             session: session(),
             origin: OriginBinding(digest: "sha256:semantic-origin"),
             handle: MediaHandle("media-semantic"),
             mimeType: "image/png",
-            byteSize: 4,
-            sha256: String(repeating: "a", count: 64),
+            byteSize: bytes.count,
+            sha256: sha256,
             observedAt: Date(timeIntervalSinceReferenceDate: 100),
             expiresAt: Date(timeIntervalSinceReferenceDate: 200)
         )
@@ -383,14 +383,42 @@ import Testing
     }
 
     @Test func semanticCoverage_WatchMediaPayload() throws {
-        let value: WatchMediaPayload = try WatchMediaPayload(descriptor: mediaDescriptor(), bytes: Data([1, 2, 3, 4]))
+        let bytes = Data([1, 2, 3, 4])
+        let value: WatchMediaPayload = try WatchMediaPayload(descriptor: mediaDescriptor(), bytes: bytes)
         let decoded: WatchMediaPayload = try roundTrip(value)
-        #expect(decoded.bytes == Data([1, 2, 3, 4]) && decoded.descriptor.byteSize == 4)
+        #expect(decoded.bytes == bytes && decoded.descriptor.byteSize == 4)
         #expect(throws: (any Error).self) { try WatchMediaPayload(descriptor: mediaDescriptor(), bytes: Data([1])) }
 
         let malformedFixture = try replacing(value, "bytes", with: Data([1]).base64EncodedString())
         #expect(throws: (any Error).self) {
             try JSONDecoder().decode(WatchMediaPayload.self, from: malformedFixture)
+        }
+    }
+
+    @Test func mediaPayloadVerifiesKnownSHA256AtInitAndDecode() throws {
+        let abc = Data("abc".utf8)
+        let uppercaseDigest = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
+        let descriptor = try mediaDescriptor(bytes: abc, sha256: uppercaseDigest)
+        let value = try WatchMediaPayload(descriptor: descriptor, bytes: abc)
+
+        #expect(value.descriptor.sha256 == uppercaseDigest)
+        #expect(try JSONDecoder().decode(WatchMediaPayload.self, from: JSONEncoder().encode(value)) == value)
+    }
+
+    @Test func mediaPayloadRejectsDigestMismatchAndByteMutation() throws {
+        let bytes = Data([1, 2, 3, 4])
+        let descriptor = try mediaDescriptor(bytes: bytes)
+        #expect(throws: DTOValidationError.invalidDigest) {
+            try WatchMediaPayload(descriptor: try mediaDescriptor(bytes: bytes, sha256: String(repeating: "0", count: 64)), bytes: bytes)
+        }
+        #expect(throws: DTOValidationError.invalidDigest) {
+            try WatchMediaPayload(descriptor: descriptor, bytes: Data([1, 2, 3, 5]))
+        }
+
+        let valid = try WatchMediaPayload(descriptor: descriptor, bytes: bytes)
+        let mutatedFixture = try replacing(valid, "bytes", with: Data([1, 2, 3, 5]).base64EncodedString())
+        #expect(throws: DTOValidationError.invalidDigest) {
+            try JSONDecoder().decode(WatchMediaPayload.self, from: mutatedFixture)
         }
     }
 
