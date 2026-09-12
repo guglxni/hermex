@@ -84,7 +84,7 @@ private enum WatchTranscriptBlockWire:Codable{case text(id:String,role:WatchMess
 
 public struct WatchTranscript: Hashable, Codable, Sendable {
     public let session: SessionKey; public let blocks: [WatchTranscriptBlock]; public let nextBefore: Int?; public let isTruncated: Bool
-    public init(session: SessionKey, blocks: [WatchTranscriptBlock], nextBefore: Int?, isTruncated: Bool) throws { guard blocks.count <= 50 else { throw DTOValidationError.tooManyItems }; if let nextBefore, nextBefore < 0 { throw DTOValidationError.invalidCount }; try blocks.forEach { try $0.validate() }; self.session=session; self.blocks=blocks; self.nextBefore=nextBefore; self.isTruncated=isTruncated }
+    public init(session: SessionKey, blocks: [WatchTranscriptBlock], nextBefore: Int?, isTruncated: Bool) throws { guard blocks.count <= 50 else { throw DTOValidationError.tooManyItems }; if let nextBefore, nextBefore < 0 { throw DTOValidationError.invalidCount }; try blocks.forEach { block in try block.validate(); if case .image(_, let descriptor, _) = block, descriptor.session != session { throw DTOValidationError.scopeMismatch } }; self.session=session; self.blocks=blocks; self.nextBefore=nextBefore; self.isTruncated=isTruncated }
     private enum CodingKeys: String, CodingKey { case session, blocks, nextBefore, isTruncated }
     public init(from decoder: Decoder) throws { let c=try decoder.container(keyedBy:CodingKeys.self); try self.init(session:c.decode(SessionKey.self,forKey:.session),blocks:c.decode([WatchTranscriptBlock].self,forKey:.blocks),nextBefore:c.decodeIfPresent(Int.self,forKey:.nextBefore),isTruncated:c.decode(Bool.self,forKey:.isTruncated)) }
 }

@@ -184,6 +184,62 @@ import WatchShared
         }
     }
 
+    @Test func publicResponseRoutesRejectTranscriptImageForDifferentSameScopeSession() throws {
+        let f = try fixtures()
+        let foreignSession = try SessionKey(scope: f.scope, sessionID: "foreign-session")
+        let descriptor = try WatchMediaDescriptor(
+            scope: f.scope,
+            session: foreignSession,
+            origin: OriginBinding(digest: "sha256:foreign-transcript-image"),
+            handle: MediaHandle("foreign-transcript-image"),
+            mimeType: "image/png",
+            byteSize: 0,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            observedAt: f.created,
+            expiresAt: f.expires
+        )
+        let validTranscript = try WatchTranscript(session: f.session, blocks: [], nextBefore: nil, isTruncated: false)
+        var transcriptObject = try object(validTranscript)
+        transcriptObject["blocks"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode([WatchTranscriptBlock.image(id: "image", descriptor: descriptor, alt: nil)]))
+        let freshness = try Freshness(observedAt: f.created, expiresAt: f.expires, source: .phoneProjection)
+        let snapshot = try ScopedSnapshot(schema: 1, scope: f.scope, revision: Revision(13), freshness: freshness, value: validTranscript)
+        let result = WatchOperationResult.transcript(snapshot)
+        let requestID = UUID(uuidString: "30000000-0000-0000-0000-000000000013")!
+        let request = try WatchRequestEnvelope.read(
+            requestID: requestID,
+            scope: f.scope,
+            operation: .transcript(session: f.session, before: nil, limit: 10),
+            createdAt: f.created,
+            expiresAt: f.expires
+        )
+        let validResponse = try WatchResponseEnvelope(
+            requestID: requestID,
+            scope: f.scope,
+            requestOperationKind: .transcript,
+            requestCreatedAt: f.created,
+            requestExpiresAt: f.expires,
+            commandContext: nil,
+            result: result
+        )
+        var responseObject = try object(validResponse)
+        var resultObject = try #require(responseObject["result"] as? [String: Any])
+        var transcriptCase = try #require(resultObject["transcript"] as? [String: Any])
+        var transcriptSnapshot = try #require(transcriptCase["_0"] as? [String: Any])
+        transcriptSnapshot["value"] = transcriptObject
+        transcriptCase["_0"] = transcriptSnapshot
+        resultObject["transcript"] = transcriptCase
+        responseObject["result"] = resultObject
+        let malformedResponse = try data(responseObject)
+
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(WatchResponseEnvelope.self, from: malformedResponse)
+        }
+
+        #expect(throws: (any Error).self) {
+            try WatchResponseEnvelope.decodeLive(malformedResponse).validate(against: request, receivedAt: f.created)
+        }
+    }
+
     @Test func semanticCoverage_WatchResponseEnvelope() throws {
         let f = try fixtures()
         let freshness = try Freshness(observedAt: f.created, expiresAt: f.expires, source: .phoneProjection)

@@ -534,6 +534,35 @@ import Testing
         #expect(throws: (any Error).self) { try WatchTranscript(session: session(), blocks: Array(repeating: block, count: 51), nextBefore: nil, isTruncated: false) }
     }
 
+    @Test func transcriptRejectsImageDescriptorForDifferentSameScopeSessionAtInitAndDecode() throws {
+        let transcriptSession = try session()
+        let foreignSession = try SessionKey(scope: scope(), sessionID: "foreign-session")
+        let descriptor = try WatchMediaDescriptor(
+            scope: scope(),
+            session: foreignSession,
+            origin: OriginBinding(digest: "sha256:foreign-transcript-image"),
+            handle: MediaHandle("foreign-transcript-image"),
+            mimeType: "image/png",
+            byteSize: 0,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            observedAt: Date(timeIntervalSinceReferenceDate: 100),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 200)
+        )
+        let foreignImage: WatchTranscriptBlock = .image(id: "image", descriptor: descriptor, alt: nil)
+
+        #expect(throws: DTOValidationError.scopeMismatch) {
+            try WatchTranscript(session: transcriptSession, blocks: [foreignImage], nextBefore: nil, isTruncated: false)
+        }
+
+        let valid = try WatchTranscript(session: transcriptSession, blocks: [], nextBefore: nil, isTruncated: false)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])
+        object["blocks"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode([foreignImage]))
+        let malformed = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: DTOValidationError.scopeMismatch) {
+            try JSONDecoder().decode(WatchTranscript.self, from: malformed)
+        }
+    }
+
     @Test func semanticCoverage_WatchTranscriptBlock() throws {
         let value: WatchTranscriptBlock = .text(id: "block-2", role: .assistant, text: "semantic text")
         let decoded: WatchTranscriptBlock = try roundTrip(value)
