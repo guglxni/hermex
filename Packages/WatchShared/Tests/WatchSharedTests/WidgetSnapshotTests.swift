@@ -3,6 +3,89 @@ import Testing
 @testable import WatchShared
 
 @Suite struct WidgetSnapshotTests {
+    @Test func semanticCoverage_RedactedDisplayName() throws {
+        let value = try RedactedDisplayName(String(repeating: "é", count: 31) + "ab")
+        #expect(value.rawValue.utf8.count == ContractLimits.displayNameUTF8Bytes)
+
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(RedactedDisplayName.self, from: encoded)
+        #expect(decoded == value)
+
+        let oversized = try JSONEncoder().encode(String(repeating: "é", count: 33))
+        #expect(throws: WidgetValidationError.invalidDisplayName) {
+            try JSONDecoder().decode(RedactedDisplayName.self, from: oversized)
+        }
+    }
+
+    @Test func semanticCoverage_RedactedWidgetSnapshot() throws {
+        let epoch = InstallationEpoch(rawValue: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!)
+        let scope = ServerScope(
+            epoch: epoch,
+            server: ServerID(rawValue: UUID(uuidString: "20000000-0000-0000-0000-000000000002")!),
+            generation: try Generation(7)
+        )
+        let value = try RedactedWidgetSnapshot(
+            schema: 1,
+            scope: scope,
+            displayName: RedactedDisplayName("Server42"),
+            activity: .needsAttention,
+            attentionCount: 999,
+            observedAt: Date(timeIntervalSince1970: 1_234_567),
+            route: .sessions(scope)
+        )
+
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(RedactedWidgetSnapshot.self, from: encoded)
+        #expect(decoded == value)
+
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["attentionCount"] = -1
+        let invalid = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: WidgetValidationError.invalidAttentionCount) {
+            try JSONDecoder().decode(RedactedWidgetSnapshot.self, from: invalid)
+        }
+    }
+
+    @Test func semanticCoverage_WidgetValidationError() throws {
+        let epoch = InstallationEpoch(rawValue: UUID(uuidString: "30000000-0000-0000-0000-000000000003")!)
+        let scope = ServerScope(
+            epoch: epoch,
+            server: ServerID(rawValue: UUID(uuidString: "40000000-0000-0000-0000-000000000004")!),
+            generation: try Generation(1)
+        )
+        let name = try RedactedDisplayName("Server1")
+
+        #expect(throws: WidgetValidationError.invalidDisplayName) { try RedactedDisplayName("   ") }
+        #expect(throws: WidgetValidationError.unsupportedSchema(9)) {
+            try RedactedWidgetSnapshot(schema: 9, scope: scope, displayName: name, activity: .idle, attentionCount: 0, observedAt: Date(), route: .sessions(scope))
+        }
+        #expect(throws: WidgetValidationError.invalidAttentionCount) {
+            try RedactedWidgetSnapshot(scope: scope, displayName: name, activity: .idle, attentionCount: -1, observedAt: Date(), route: .sessions(scope))
+        }
+        #expect(throws: WidgetValidationError.nonfiniteObservedAt) {
+            try RedactedWidgetSnapshot(scope: scope, displayName: name, activity: .idle, attentionCount: 0, observedAt: Date(timeIntervalSince1970: .infinity), route: .sessions(scope))
+        }
+
+        let otherScope = ServerScope(epoch: epoch, server: ServerID(rawValue: UUID()), generation: try Generation(1))
+        #expect(throws: WidgetValidationError.routeScopeMismatch) {
+            try RedactedWidgetSnapshot(scope: scope, displayName: name, activity: .idle, attentionCount: 0, observedAt: Date(), route: .sessions(otherScope))
+        }
+        #expect(throws: WidgetValidationError.tooLarge) {
+            try RedactedWidgetSnapshot.decode(Data(repeating: 0x20, count: ContractLimits.widgetJSONBytes + 1))
+        }
+
+        let snapshot = try RedactedWidgetSnapshot(scope: scope, displayName: name, activity: .idle, attentionCount: 0, observedAt: Date(), route: .sessions(scope))
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+        var route = try #require(object["route"] as? [String: Any])
+        route["padding"] = String(repeating: "x", count: ContractLimits.routeJSONBytes)
+        object["route"] = route
+        let routeOversized = try JSONSerialization.data(withJSONObject: object)
+        #expect(routeOversized.count <= ContractLimits.widgetJSONBytes)
+        #expect(throws: WidgetValidationError.routeTooLarge) {
+            try RedactedWidgetSnapshot.decode(routeOversized)
+        }
+    }
+
     @Test func displayNamePreservesAcceptedBytes() throws {
         let original = "  Server Ω  "
         let name = try RedactedDisplayName(original)

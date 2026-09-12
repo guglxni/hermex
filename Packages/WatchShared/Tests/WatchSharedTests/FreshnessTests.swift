@@ -225,3 +225,136 @@ import Testing
         }
     }
 }
+
+private func semanticFreshnessScope() throws -> ServerScope {
+    ServerScope(
+        epoch: InstallationEpoch(rawValue: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!),
+        server: ServerID(rawValue: UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!),
+        generation: try Generation(3)
+    )
+}
+
+@Suite struct FreshnessSemanticCoverageTests {
+    @Test func semanticCoverage_Freshness() throws {
+        let value: Freshness = try Freshness(
+            observedAt: Date(timeIntervalSinceReferenceDate: 100),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 160),
+            source: .phoneProjection
+        )
+        #expect(value.source == .phoneProjection)
+        #expect(value.isFresh(at: Date(timeIntervalSinceReferenceDate: 159)))
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(Freshness.self, from: encoded)
+        #expect(decoded == value)
+        #expect(throws: FreshnessValidationError.expiryBeforeObservation) {
+            try Freshness(
+                observedAt: Date(timeIntervalSinceReferenceDate: 100),
+                expiresAt: Date(timeIntervalSinceReferenceDate: 99),
+                source: .cache
+            )
+        }
+    }
+
+    @Test func semanticCoverage_FreshnessValidationError() throws {
+        let nonfinite: FreshnessValidationError = .nonfiniteTimestamp
+        let reversed: FreshnessValidationError = .expiryBeforeObservation
+        let schema: FreshnessValidationError = .unsupportedSchema(17)
+        #expect(nonfinite == .nonfiniteTimestamp)
+        #expect(reversed == .expiryBeforeObservation)
+        #expect(schema == .unsupportedSchema(17))
+        #expect(throws: nonfinite) {
+            try Freshness(observedAt: Date(timeIntervalSinceReferenceDate: .infinity), expiresAt: nil, source: .cache)
+        }
+        #expect(throws: reversed) {
+            try Freshness(observedAt: Date(timeIntervalSinceReferenceDate: 2), expiresAt: Date(timeIntervalSinceReferenceDate: 1), source: .cache)
+        }
+        #expect(throws: schema) {
+            try ScopedSnapshot(schema: 17, scope: semanticFreshnessScope(), revision: Revision(0), freshness: Freshness(observedAt: Date(timeIntervalSinceReferenceDate: 1), expiresAt: nil, source: .cache), value: "payload")
+        }
+    }
+
+    @Test func semanticCoverage_RegistryEntry() throws {
+        let value: RegistryEntry = RegistryEntry(
+            scope: try semanticFreshnessScope(),
+            displayName: try RedactedDisplayName("Semantic Server")
+        )
+        #expect(value.displayName.rawValue == "Semantic Server")
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(RegistryEntry.self, from: encoded)
+        #expect(decoded == value)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["displayName"] = " "
+        #expect(throws: WidgetValidationError.invalidDisplayName) {
+            try JSONDecoder().decode(RegistryEntry.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+
+    @Test func semanticCoverage_RegistrySnapshot() throws {
+        let epoch = try semanticFreshnessScope().epoch
+        let entry: RegistryEntry = RegistryEntry(scope: try semanticFreshnessScope(), displayName: try RedactedDisplayName("Registry Server"))
+        let value: RegistrySnapshot = try RegistrySnapshot(
+            epoch: epoch,
+            revision: Revision(8),
+            generatedAt: Date(timeIntervalSinceReferenceDate: 200),
+            entries: [entry]
+        )
+        #expect(value.schemaVersion == 1)
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(RegistrySnapshot.self, from: encoded)
+        #expect(decoded == value)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["schemaVersion"] = 9
+        #expect(throws: RegistryValidationError.unsupportedSchema(9)) {
+            try JSONDecoder().decode(RegistrySnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+
+    @Test func semanticCoverage_RegistryValidationError() throws {
+        let server = ServerID(rawValue: UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!)
+        let schema: RegistryValidationError = .unsupportedSchema(4)
+        let nonfinite: RegistryValidationError = .nonfiniteGeneratedAt
+        let tooMany: RegistryValidationError = .tooManyEntries
+        let duplicate: RegistryValidationError = .duplicateServer(server)
+        let epoch: RegistryValidationError = .epochMismatch
+        #expect(schema == .unsupportedSchema(4))
+        #expect(nonfinite == .nonfiniteGeneratedAt)
+        #expect(tooMany == .tooManyEntries)
+        #expect(duplicate == .duplicateServer(server))
+        #expect(epoch == .epochMismatch)
+        #expect(throws: schema) {
+            try RegistrySnapshot(schemaVersion: 4, epoch: InstallationEpoch(rawValue: UUID()), revision: Revision(0), generatedAt: Date(), entries: [])
+        }
+        #expect(throws: nonfinite) {
+            try RegistrySnapshot(epoch: InstallationEpoch(rawValue: UUID()), revision: Revision(0), generatedAt: Date(timeIntervalSinceReferenceDate: .nan), entries: [])
+        }
+    }
+
+    @Test func semanticCoverage_ScopedSnapshot() throws {
+        let scope = try semanticFreshnessScope()
+        let freshness = try Freshness(
+            observedAt: Date(timeIntervalSinceReferenceDate: 300),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 360),
+            source: .directServer
+        )
+        let value: ScopedSnapshot<String> = try ScopedSnapshot(
+            schema: 1,
+            scope: scope,
+            revision: Revision(11),
+            freshness: freshness,
+            value: "typed-payload"
+        )
+        #expect(value.value == "typed-payload")
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(ScopedSnapshot<String>.self, from: encoded)
+        #expect(decoded.schema == value.schema)
+        #expect(decoded.scope == value.scope)
+        #expect(decoded.revision == value.revision)
+        #expect(decoded.freshness == value.freshness)
+        #expect(decoded.value == value.value)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["schema"] = 2
+        #expect(throws: FreshnessValidationError.unsupportedSchema(2)) {
+            try JSONDecoder().decode(ScopedSnapshot<String>.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+}

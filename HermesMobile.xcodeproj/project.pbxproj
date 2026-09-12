@@ -457,6 +457,11 @@
 		WAT000000000000000000009 /* HermexWatchRoot in Frameworks */ = {isa = PBXBuildFile; productRef = WAT000000000000000000601 /* HermexWatchRoot */; };
 		WAT00000000000000000000A /* HermexWatchWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = WAT00000000000000000010A /* HermexWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		WAT00000000000000000000B /* HermexWatchApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000109 /* HermexWatchApp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		U01C00000000000000000001 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
+		U01C00000000000000000002 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
+		U01C00000000000000000003 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
+		U01C00000000000000000004 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
+		U01C00000000000000000005 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -993,6 +998,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				U01C00000000000000000001 /* WatchShared in Frameworks */,
 				1A2B3C4D5E6F700000000004 /* LDSwiftEventSource in Frameworks */,
 				1A2B3C4D5E6F700000000005 /* MarkdownUI in Frameworks */,
 				1A2B3C4D5E6F700000000006 /* Splash in Frameworks */,
@@ -1006,6 +1012,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				U01C00000000000000000002 /* WatchShared in Frameworks */,
 				C21300000000000000000007 /* MarkdownUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1028,12 +1035,13 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				U01C00000000000000000003 /* WatchShared in Frameworks */,
 				WAT000000000000000000009 /* HermexWatchRoot in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		WAT000000000000000000305 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		WAT000000000000000000309 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		WAT000000000000000000305 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (U01C00000000000000000004 /* WatchShared in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+		WAT000000000000000000309 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (U01C00000000000000000005 /* WatchShared in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 		WAT00000000000000000030B /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
@@ -1768,6 +1776,7 @@
 				1A2B3C4D5E6F700000000097 /* Highlightr */,
 				1A2B3C4D5E6F700000000098 /* KeychainAccess */,
 				5417A7400000000000000091 /* SwiftMath */,
+				U01C00000000000000000100 /* WatchShared */,
 			);
 			productName = HermesMobile;
 			productReference = 1A2B3C4D5E6F700000000010 /* HermesMobile.app */;
@@ -1788,6 +1797,7 @@
 			name = HermesMobileTests;
 			packageProductDependencies = (
 				C21300000000000000000008 /* MarkdownUI */,
+				U01C00000000000000000100 /* WatchShared */,
 			);
 			productName = HermesMobileTests;
 			productReference = 1A2B3C4D5E6F700000000015 /* HermesMobileTests.xctest */;
@@ -1828,13 +1838,13 @@
 			productType = "com.apple.product-type.app-extension";
 		};
 		WAT000000000000000000401 /* HermexWatchApp */ = {
-			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000701; buildPhases = (WAT000000000000000000301, WAT000000000000000000302, WAT000000000000000000304, WAT000000000000000000307, ); buildRules = (); dependencies = (WAT000000000000000000212, ); name = HermexWatchApp; packageProductDependencies = (WAT000000000000000000601, ); productName = HermexWatchApp; productReference = WAT000000000000000000109; productType = "com.apple.product-type.application";
+			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000701; buildPhases = (WAT000000000000000000301, WAT000000000000000000302, WAT000000000000000000304, WAT000000000000000000307, ); buildRules = (); dependencies = (WAT000000000000000000212, ); name = HermexWatchApp; packageProductDependencies = (WAT000000000000000000601, U01C00000000000000000100 /* WatchShared */, ); productName = HermexWatchApp; productReference = WAT000000000000000000109; productType = "com.apple.product-type.application";
 		};
 		WAT000000000000000000402 /* HermexWatchWidget */ = {
-			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000702; buildPhases = (WAT000000000000000000306, WAT000000000000000000305, WAT000000000000000000308, ); buildRules = (); dependencies = (); name = HermexWatchWidget; productName = HermexWatchWidget; productReference = WAT00000000000000000010A; productType = "com.apple.product-type.app-extension";
+			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000702; buildPhases = (WAT000000000000000000306, WAT000000000000000000305, WAT000000000000000000308, ); buildRules = (); dependencies = (); name = HermexWatchWidget; packageProductDependencies = (U01C00000000000000000100 /* WatchShared */, ); productName = HermexWatchWidget; productReference = WAT00000000000000000010A; productType = "com.apple.product-type.app-extension";
 		};
 		WAT000000000000000000403 /* HermexWatchAppTests */ = {
-			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000703; buildPhases = (WAT00000000000000000030A, WAT000000000000000000309, ); buildRules = (); dependencies = (WAT000000000000000000213, ); name = HermexWatchAppTests; productName = HermexWatchAppTests; productReference = WAT00000000000000000010B; productType = "com.apple.product-type.bundle.unit-test";
+			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000703; buildPhases = (WAT00000000000000000030A, WAT000000000000000000309, ); buildRules = (); dependencies = (WAT000000000000000000213, ); name = HermexWatchAppTests; packageProductDependencies = (U01C00000000000000000100 /* WatchShared */, ); productName = HermexWatchAppTests; productReference = WAT00000000000000000010B; productType = "com.apple.product-type.bundle.unit-test";
 		};
 		WAT000000000000000000404 /* HermexWatchAppUITests */ = {
 			isa = PBXNativeTarget; buildConfigurationList = WAT000000000000000000704; buildPhases = (WAT00000000000000000030C, WAT00000000000000000030B, ); buildRules = (); dependencies = (WAT000000000000000000214, ); name = HermexWatchAppUITests; productName = HermexWatchAppUITests; productReference = WAT00000000000000000010C; productType = "com.apple.product-type.bundle.ui-testing";
@@ -1902,6 +1912,7 @@
 				1A2B3C4D5E6F700000000099 /* XCRemoteSwiftPackageReference "KeychainAccess" */,
 				5417A7400000000000000090 /* XCRemoteSwiftPackageReference "SwiftMath" */,
 				WAT000000000000000000600 /* XCLocalSwiftPackageReference "HermexWatchRoot" */,
+				U01C000000000000000000100 /* XCLocalSwiftPackageReference "WatchShared" */,
 			);
 			productRefGroup = 1A2B3C4D5E6F700000000032 /* Products */;
 			projectDirPath = "";
@@ -2888,6 +2899,7 @@
 			};
 		};
 		WAT000000000000000000600 /* XCLocalSwiftPackageReference "HermexWatchRoot" */ = {isa = XCLocalSwiftPackageReference; relativePath = Packages/HermexWatchRoot; };
+		U01C000000000000000000100 /* XCLocalSwiftPackageReference "WatchShared" */ = {isa = XCLocalSwiftPackageReference; relativePath = Packages/WatchShared; };
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -2927,6 +2939,7 @@
 			productName = SwiftMath;
 		};
 		WAT000000000000000000601 /* HermexWatchRoot */ = {isa = XCSwiftPackageProductDependency; productName = HermexWatchRoot; };
+		U01C00000000000000000100 /* WatchShared */ = {isa = XCSwiftPackageProductDependency; package = U01C000000000000000000100 /* XCLocalSwiftPackageReference "WatchShared" */; productName = WatchShared; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1A2B3C4D5E6F700000000070 /* Project object */;

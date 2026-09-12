@@ -129,3 +129,100 @@ public struct BotKey: Hashable, Codable, Sendable {
         )
     }
 }
+
+private func validateIdentityString(_ value: String, maxUTF8Bytes: Int = ContractLimits.identifierUTF8Bytes) throws {
+    guard !value.allSatisfy(\.isWhitespace) else { throw IdentityValidationError.blankIdentifier }
+    guard value.utf8.count <= maxUTF8Bytes else {
+        throw IdentityValidationError.identifierTooLong(maxUTF8Bytes: maxUTF8Bytes)
+    }
+}
+
+public struct RunKey: Hashable, Codable, Sendable {
+    public let session: SessionKey
+    public let streamID: String
+    public init(session: SessionKey, streamID: String) throws { try validateIdentityString(streamID); self.session = session; self.streamID = streamID }
+    private enum CodingKeys: String, CodingKey { case session, streamID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(session: c.decode(SessionKey.self, forKey: .session), streamID: c.decode(String.self, forKey: .streamID)) }
+}
+
+public struct TaskKey: Hashable, Codable, Sendable {
+    public let scope: ServerScope; public let jobID: String
+    public init(scope: ServerScope, jobID: String) throws { try validateIdentityString(jobID); self.scope = scope; self.jobID = jobID }
+    private enum CodingKeys: String, CodingKey { case scope, jobID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(scope: c.decode(ServerScope.self, forKey: .scope), jobID: c.decode(String.self, forKey: .jobID)) }
+}
+
+public struct ApprovalKey: Hashable, Codable, Sendable {
+    public let session: SessionKey; public let remoteID: String
+    public init(session: SessionKey, remoteID: String) throws { try validateIdentityString(remoteID); self.session = session; self.remoteID = remoteID }
+    private enum CodingKeys: String, CodingKey { case session, remoteID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(session: c.decode(SessionKey.self, forKey: .session), remoteID: c.decode(String.self, forKey: .remoteID)) }
+}
+
+public struct ClarificationKey: Hashable, Codable, Sendable {
+    public let session: SessionKey; public let remoteID: String
+    public init(session: SessionKey, remoteID: String) throws { try validateIdentityString(remoteID); self.session = session; self.remoteID = remoteID }
+    private enum CodingKeys: String, CodingKey { case session, remoteID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(session: c.decode(SessionKey.self, forKey: .session), remoteID: c.decode(String.self, forKey: .remoteID)) }
+}
+
+public struct ProfileID: Hashable, Codable, Sendable {
+    public let rawValue: String
+    public init(_ rawValue: String) throws { try validateIdentityString(rawValue); self.rawValue = rawValue }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var c = encoder.singleValueContainer(); try c.encode(rawValue) }
+}
+
+public struct WorkspaceHandle: Hashable, Codable, Sendable {
+    public let rawValue: String
+    public init(_ rawValue: String) throws { try validateIdentityString(rawValue); self.rawValue = rawValue }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var c = encoder.singleValueContainer(); try c.encode(rawValue) }
+}
+
+public struct PathHandle: Hashable, Codable, Sendable {
+    public let rawValue: String
+    public init(_ rawValue: String) throws { try validateIdentityString(rawValue); self.rawValue = rawValue }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var c = encoder.singleValueContainer(); try c.encode(rawValue) }
+}
+
+public struct MediaHandle: Hashable, Codable, Sendable {
+    public let rawValue: String
+    public init(_ rawValue: String) throws { try validateIdentityString(rawValue); self.rawValue = rawValue }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var c = encoder.singleValueContainer(); try c.encode(rawValue) }
+}
+
+public struct DraftHandle: Hashable, Codable, Sendable {
+    public let rawValue: UUID
+    public init(rawValue: UUID) { self.rawValue = rawValue }
+}
+
+public struct OriginBinding: Hashable, Codable, Sendable {
+    public let digest: String
+    public init(digest: String) throws { try validateIdentityString(digest); self.digest = digest }
+    private enum CodingKeys: String, CodingKey { case digest }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(digest: c.decode(String.self, forKey: .digest)) }
+}
+
+public struct SkillKey: Hashable, Codable, Sendable {
+    public let scope: ServerScope; public let name: String
+    public init(scope: ServerScope, name: String) throws { try validateIdentityString(name); self.scope = scope; self.name = name }
+    private enum CodingKeys: String, CodingKey { case scope, name }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(scope: c.decode(ServerScope.self, forKey: .scope), name: c.decode(String.self, forKey: .name)) }
+}
+
+public struct MemoryKey: Hashable, Codable, Sendable {
+    public let scope: ServerScope; public let remoteID: String
+    public init(scope: ServerScope, remoteID: String) throws { try validateIdentityString(remoteID); self.scope = scope; self.remoteID = remoteID }
+    private enum CodingKeys: String, CodingKey { case scope, remoteID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(scope: c.decode(ServerScope.self, forKey: .scope), remoteID: c.decode(String.self, forKey: .remoteID)) }
+}
+
+public struct InsightKey: Hashable, Codable, Sendable {
+    public let scope: ServerScope; public let remoteID: String
+    public init(scope: ServerScope, remoteID: String) throws { try validateIdentityString(remoteID); self.scope = scope; self.remoteID = remoteID }
+    private enum CodingKeys: String, CodingKey { case scope, remoteID }
+    public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); try self.init(scope: c.decode(ServerScope.self, forKey: .scope), remoteID: c.decode(String.self, forKey: .remoteID)) }
+}
