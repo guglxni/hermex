@@ -22,13 +22,15 @@ Hermex connects to servers wherever they live: on the same Mac over `localhost`,
 
 ### 4. Multi-surface
 
-Hermex has 3 key app surfaces: **the app**, **the share extension**, and **the Live Activity widget**.
+Hermex has 4 app surfaces: **the app**, **the share extension**, **the Live Activity widget**, and **the watch companion**.
 
 **The app** is the main surface. It is a native SwiftUI app, not a web wrapper, and should behave like a first-rate iOS app across navigation, gestures, keyboard input, accessibility, backgrounding, deep links, App Intents, and notifications.
 
 **The share extension** (`HermesShareExtension`) lets users send files and text from other apps into a session. It stages imports through the app group and hands off to the main app.
 
 **The Live Activity widget** (`HermesLiveActivityWidget`) shows streaming progress on the Lock Screen and Dynamic Island and routes taps back into the app. Both extensions are separate Xcode targets with their own membership of shared models and resources.
+
+**The watch companion** (`HermexWatchApp`) is a phone-proxied on-the-go control surface, not a tiny iPhone. The watch never talks to `hermes-webui`. It sends `WatchShared` envelopes to the iPhone over WatchConnectivity; `PhoneCompanionBroker` maps registry, sessions, create, send, and stop onto the existing `APIClient`. The home surface is **Now**: glance the preferred session, speak a short voice note (record on watch; iPhone transcribes via `/api/transcribe`, uploads the clip, and sends transcript + attachment), and stop a watch-started run. Complications read a redacted widget snapshot from the watch app group. Do not port Kanban, workspace, bots, settings, or approvals. Approvals stay default-rejected on this pin. Keep first-run copy truthful: if the phone is not reachable, stay on "Set up on iPhone".
 
 ## A note from Uzair
 

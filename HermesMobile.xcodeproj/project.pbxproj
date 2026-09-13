@@ -457,6 +457,18 @@
 		WAT000000000000000000009 /* HermexWatchRoot in Frameworks */ = {isa = PBXBuildFile; productRef = WAT000000000000000000601 /* HermexWatchRoot */; };
 		WAT00000000000000000000A /* HermexWatchWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = WAT00000000000000000010A /* HermexWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		WAT00000000000000000000B /* HermexWatchApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000109 /* HermexWatchApp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		W4C0000000000000000000B1 /* WatchInstallationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = W4C0000000000000000000A1 /* WatchInstallationIdentity.swift */; };
+		W4C0000000000000000000B2 /* APIClientWatchPhoneBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = W4C0000000000000000000A2 /* APIClientWatchPhoneBackend.swift */; };
+		W4C0000000000000000000B3 /* PhoneWatchConnectivityHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = W4C0000000000000000000A3 /* PhoneWatchConnectivityHost.swift */; };
+		WAT000000000000000000011 /* WatchConnectivitySupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000111 /* WatchConnectivitySupport.swift */; };
+		WAT000000000000000000012 /* WatchSessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000112 /* WatchSessionListView.swift */; };
+		WAT000000000000000000013 /* WatchSessionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000113 /* WatchSessionDetailView.swift */; };
+		WAT000000000000000000014 /* WatchNowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000114 /* WatchNowView.swift */; };
+		WAT000000000000000000015 /* WatchVoiceNoteRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000115 /* WatchVoiceNoteRecorder.swift */; };
+		WAT000000000000000000017 /* WatchReplySpeaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000117 /* WatchReplySpeaker.swift */; };
+		WAT000000000000000000018 /* WatchWidgetSnapshotPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000118 /* WatchWidgetSnapshotPublisher.swift */; };
+		WAT000000000000000000019 /* WatchHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT000000000000000000119 /* WatchHaptics.swift */; };
+		WAT00000000000000000001A /* WatchSpeakControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = WAT00000000000000000011A /* WatchSpeakControls.swift */; };
 		U01C00000000000000000001 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
 		U01C00000000000000000002 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
 		U01C00000000000000000003 /* WatchShared in Frameworks */ = {isa = PBXBuildFile; productRef = U01C00000000000000000100 /* WatchShared */; };
@@ -977,6 +989,18 @@
 		26C849A9CE6B47E79695E069 /* BotChatPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotChatPresentationTests.swift"; sourceTree = "<group>"; };
 		WAT000000000000000000101 /* HermexWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermexWatchApp.swift; sourceTree = "<group>"; };
 		WAT000000000000000000102 /* WatchRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootView.swift; sourceTree = "<group>"; };
+		W4C0000000000000000000A1 /* WatchInstallationIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchInstallationIdentity.swift; sourceTree = "<group>"; };
+		W4C0000000000000000000A2 /* APIClientWatchPhoneBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientWatchPhoneBackend.swift; sourceTree = "<group>"; };
+		W4C0000000000000000000A3 /* PhoneWatchConnectivityHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneWatchConnectivityHost.swift; sourceTree = "<group>"; };
+		WAT000000000000000000111 /* WatchConnectivitySupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchConnectivitySupport.swift; sourceTree = "<group>"; };
+		WAT000000000000000000112 /* WatchSessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSessionListView.swift; sourceTree = "<group>"; };
+		WAT000000000000000000113 /* WatchSessionDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSessionDetailView.swift; sourceTree = "<group>"; };
+		WAT000000000000000000114 /* WatchNowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchNowView.swift; sourceTree = "<group>"; };
+		WAT000000000000000000115 /* WatchVoiceNoteRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchVoiceNoteRecorder.swift; sourceTree = "<group>"; };
+		WAT000000000000000000117 /* WatchReplySpeaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchReplySpeaker.swift; sourceTree = "<group>"; };
+		WAT000000000000000000118 /* WatchWidgetSnapshotPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchWidgetSnapshotPublisher.swift; sourceTree = "<group>"; };
+		WAT000000000000000000119 /* WatchHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchHaptics.swift; sourceTree = "<group>"; };
+		WAT00000000000000000011A /* WatchSpeakControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSpeakControls.swift; sourceTree = "<group>"; };
 		WAT000000000000000000103 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		WAT000000000000000000104 /* HermexWatchWidgetBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermexWatchWidgetBundle.swift; sourceTree = "<group>"; };
 		WAT000000000000000000105 /* HermexWatchWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermexWatchWidget.swift; sourceTree = "<group>"; };
@@ -1075,6 +1099,7 @@
 				1A2B3C4D5E6F7000000000C2 /* Models */,
 				1A2B3C4D5E6F7000000000F0 /* Persistence */,
 				1A2B3C4D5E6F7000000000C3 /* Features */,
+				W4C0000000000000000000G1 /* WatchCompanion */,
 				1A2B3C4D5E6F700000000033 /* Resources */,
 			);
 			path = HermesMobile;
@@ -1735,12 +1760,26 @@
 			path = Insights;
 			sourceTree = "<group>";
 		};
+		W4C0000000000000000000G1 /* WatchCompanion */ = {
+			isa = PBXGroup;
+			children = (
+				W4C0000000000000000000A1 /* WatchInstallationIdentity.swift */,
+				W4C0000000000000000000A2 /* APIClientWatchPhoneBackend.swift */,
+				W4C0000000000000000000A3 /* PhoneWatchConnectivityHost.swift */,
+			);
+			path = WatchCompanion;
+			sourceTree = "<group>";
+		};
 		WAT000000000000000000501 /* HermexWatch */ = {
 			isa = PBXGroup;
-			children = (WAT000000000000000000511 /* App */, WAT000000000000000000512 /* Root */, WAT000000000000000000513 /* Resources */, );
+			children = (WAT000000000000000000511 /* App */, WAT000000000000000000512 /* Root */, WAT000000000000000000515 /* Companion */, WAT000000000000000000516 /* Sessions */, WAT000000000000000000517 /* Now */, WAT000000000000000000518 /* Voice */, WAT000000000000000000513 /* Resources */, );
 			path = HermexWatch;
 			sourceTree = "<group>";
 		};
+		WAT000000000000000000515 /* Companion */ = {isa = PBXGroup; children = (WAT000000000000000000111 /* WatchConnectivitySupport.swift */, WAT000000000000000000118 /* WatchWidgetSnapshotPublisher.swift */, WAT000000000000000000119 /* WatchHaptics.swift */, ); path = Companion; sourceTree = "<group>"; };
+		WAT000000000000000000516 /* Sessions */ = {isa = PBXGroup; children = (WAT000000000000000000112 /* WatchSessionListView.swift */, WAT000000000000000000113 /* WatchSessionDetailView.swift */, ); path = Sessions; sourceTree = "<group>"; };
+		WAT000000000000000000517 /* Now */ = {isa = PBXGroup; children = (WAT000000000000000000114 /* WatchNowView.swift */, ); path = Now; sourceTree = "<group>"; };
+		WAT000000000000000000518 /* Voice */ = {isa = PBXGroup; children = (WAT000000000000000000115 /* WatchVoiceNoteRecorder.swift */, WAT000000000000000000117 /* WatchReplySpeaker.swift */, WAT00000000000000000011A /* WatchSpeakControls.swift */, ); path = Voice; sourceTree = "<group>"; };
 		WAT000000000000000000511 /* App */ = {isa = PBXGroup; children = (WAT000000000000000000101 /* HermexWatchApp.swift */, ); path = App; sourceTree = "<group>"; };
 		WAT000000000000000000512 /* Root */ = {isa = PBXGroup; children = (WAT000000000000000000102 /* WatchRootView.swift */, ); path = Root; sourceTree = "<group>"; };
 		WAT000000000000000000513 /* Resources */ = {isa = PBXGroup; children = (WAT000000000000000000103 /* Assets.xcassets */, WAT000000000000000000110 /* Info.plist */, WAT00000000000000000010D /* HermexWatch.entitlements */, ); path = Resources; sourceTree = "<group>"; };
@@ -2242,6 +2281,9 @@
 				26AB000000000000000000B2 /* ProvidersView.swift in Sources */,
 				B5A100000000000000000001 /* SharedDraftStore.swift in Sources */,
 				B5A100000000000000000008 /* ShareInputReader.swift in Sources */,
+				W4C0000000000000000000B1 /* WatchInstallationIdentity.swift in Sources */,
+				W4C0000000000000000000B2 /* APIClientWatchPhoneBackend.swift in Sources */,
+				W4C0000000000000000000B3 /* PhoneWatchConnectivityHost.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2415,7 +2457,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		WAT000000000000000000301 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (WAT000000000000000000001 /* HermexWatchApp.swift in Sources */, WAT000000000000000000002 /* WatchRootView.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		WAT000000000000000000301 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (WAT000000000000000000001 /* HermexWatchApp.swift in Sources */, WAT000000000000000000002 /* WatchRootView.swift in Sources */, WAT000000000000000000011 /* WatchConnectivitySupport.swift in Sources */, WAT000000000000000000012 /* WatchSessionListView.swift in Sources */, WAT000000000000000000013 /* WatchSessionDetailView.swift in Sources */, WAT000000000000000000014 /* WatchNowView.swift in Sources */, WAT000000000000000000015 /* WatchVoiceNoteRecorder.swift in Sources */, WAT000000000000000000017 /* WatchReplySpeaker.swift in Sources */, WAT000000000000000000018 /* WatchWidgetSnapshotPublisher.swift in Sources */, WAT000000000000000000019 /* WatchHaptics.swift in Sources */, WAT00000000000000000001A /* WatchSpeakControls.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 		WAT000000000000000000306 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (WAT000000000000000000004 /* HermexWatchWidgetBundle.swift in Sources */, WAT000000000000000000005 /* HermexWatchWidget.swift in Sources */, WAT000000000000000000006 /* HermexWatchTimelineProvider.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 		WAT00000000000000000030A /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (WAT000000000000000000007 /* HermexWatchAppTests.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 		WAT00000000000000000030C /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (WAT000000000000000000008 /* HermexWatchAppUITests.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };

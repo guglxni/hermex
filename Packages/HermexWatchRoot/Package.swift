@@ -10,8 +10,14 @@ let package = Package(
     products: [
         .library(name: "HermexWatchRoot", targets: ["HermexWatchRoot"]),
     ],
+    dependencies: [
+        .package(path: "../WatchShared"),
+    ],
     targets: [
-        .target(name: "HermexWatchRoot"),
+        .target(
+            name: "HermexWatchRoot",
+            dependencies: ["WatchShared"]
+        ),
         .testTarget(name: "HermexWatchRootTests", dependencies: ["HermexWatchRoot"]),
     ],
     swiftLanguageModes: [.v5]

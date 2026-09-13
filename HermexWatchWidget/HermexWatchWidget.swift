@@ -1,5 +1,6 @@
 import SwiftUI
 import WidgetKit
+import WatchShared
 
 struct HermexWatchWidget: Widget {
     let kind = "HermexWatchWidget"
@@ -9,7 +10,7 @@ struct HermexWatchWidget: Widget {
             HermexWatchWidgetView(entry: entry)
         }
         .configurationDisplayName("Hermex")
-        .description("Shows whether Hermex is ready on Apple Watch.")
+        .description("Glance whether a session is running or needs you.")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -22,19 +23,49 @@ private struct HermexWatchWidgetView: View {
         Group {
             switch family {
             case .accessoryCircular:
-                Image(systemName: "iphone.and.arrow.forward")
-                    .widgetLabel("Set up")
+                Image(systemName: symbolName)
+                    .widgetLabel(statusText)
             case .accessoryInline:
-                Label("Set up on iPhone", systemImage: "iphone")
+                Label(inlineText, systemImage: symbolName)
             default:
                 VStack(alignment: .leading) {
-                    Text("Hermex")
+                    Text(entry.snapshot?.displayName.rawValue ?? "Hermex")
                         .font(.headline)
-                    Text("Set up on iPhone")
+                    Text(statusText)
                         .font(.caption)
                 }
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var symbolName: String {
+        switch entry.snapshot?.activity {
+        case .running: return "ellipsis.circle"
+        case .needsAttention: return "exclamationmark.circle"
+        case .idle: return "checkmark.circle"
+        case .unknown, nil: return "iphone.and.arrow.forward"
+        }
+    }
+
+    private var statusText: String {
+        switch entry.snapshot?.activity {
+        case .running: return "Running"
+        case .needsAttention: return "Needs you"
+        case .idle: return "Ready"
+        case .unknown, nil: return "Set up on iPhone"
+        }
+    }
+
+    private var inlineText: String {
+        if let snapshot = entry.snapshot {
+            return "\(snapshot.displayName.rawValue) · \(statusText)"
+        }
+        return "Set up on iPhone"
+    }
+
+    private var accessibilityText: String {
+        inlineText
     }
 }

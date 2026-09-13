@@ -20,6 +20,11 @@ WATCH_SHARED_TARGETS = {
     "HermexWatchWidget",
     "HermexWatchAppTests",
 }
+AUTHORIZED_IOS_WATCH_COMPANION_SOURCES = {
+    "WatchInstallationIdentity.swift",
+    "APIClientWatchPhoneBackend.swift",
+    "PhoneWatchConnectivityHost.swift",
+}
 
 
 def load_project():
@@ -98,6 +103,20 @@ class WatchProjectStructureTests(unittest.TestCase):
         self, target_name, actual_phase, expected_phase, watch_shared_product
     ):
         actual_files = actual_phase.get("files", [])
+        if (
+            expected_phase["isa"] == "PBXSourcesBuildPhase"
+            and target_name == "HermesMobile"
+        ):
+            extras = [item for item in actual_files if item not in expected_phase["files"]]
+            for build_file_id in extras:
+                file_ref = self.objects[build_file_id]["fileRef"]
+                path = self.objects[file_ref].get("path", "")
+                self.assertIn(path, AUTHORIZED_IOS_WATCH_COMPANION_SOURCES)
+            self.assertEqual(
+                [item for item in actual_files if item in set(expected_phase["files"])],
+                expected_phase["files"],
+            )
+            return
         if expected_phase["isa"] != "PBXFrameworksBuildPhase" or target_name not in WATCH_SHARED_TARGETS:
             self.assertEqual(actual_files, expected_phase["files"])
             return

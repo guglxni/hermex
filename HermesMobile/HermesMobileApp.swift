@@ -55,13 +55,16 @@ struct HermesMobileApp: App {
                 NavigationStack {
                     StreamingLabView()
                 }
+                .onAppear { PhoneWatchConnectivityHost.shared.activate() }
             } else {
                 ContentView(authManager: authManager)
                     .preferredColorScheme(AppTheme.storedValue(appThemeRawValue).colorScheme)
+                    .onAppear { PhoneWatchConnectivityHost.shared.activate() }
             }
             #else
             ContentView(authManager: authManager)
                 .preferredColorScheme(AppTheme.storedValue(appThemeRawValue).colorScheme)
+                .onAppear { PhoneWatchConnectivityHost.shared.activate() }
             #endif
         }
         .modelContainer(for: [CachedSession.self, CachedMessage.self])
