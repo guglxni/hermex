@@ -2,13 +2,20 @@ import Foundation
 
 public struct WatchWireDispatcher: Sendable {
     public typealias VoiceNoteHandler = @Sendable (WatchVoiceNoteRequest) async -> CommandReceipt<RunKey>
+    public typealias PhotoHandler = @Sendable (WatchPhotoSendRequest) async -> CommandReceipt<RunKey>
 
     private let service: any WatchCompanionServicing
     private let transcribe: VoiceNoteHandler?
+    private let sendPhoto: PhotoHandler?
 
-    public init(service: any WatchCompanionServicing, transcribe: VoiceNoteHandler? = nil) {
+    public init(
+        service: any WatchCompanionServicing,
+        transcribe: VoiceNoteHandler? = nil,
+        sendPhoto: PhotoHandler? = nil
+    ) {
         self.service = service
         self.transcribe = transcribe
+        self.sendPhoto = sendPhoto
     }
 
     public func handle(_ message: WatchWireMessage) async -> WatchWireReply {
@@ -23,6 +30,10 @@ public struct WatchWireDispatcher: Sendable {
             return await handleTranscribe(request)
         case .transcribeFile:
             return .failure(.rejected(status: 404, sanitizedCode: "transcribeFileUnresolved"))
+        case .sendPhoto(let request):
+            return await handlePhoto(request)
+        case .sendPhotoFile:
+            return .failure(.rejected(status: 404, sanitizedCode: "sendPhotoFileUnresolved"))
         }
     }
 
@@ -33,6 +44,17 @@ public struct WatchWireDispatcher: Sendable {
         let receipt = await transcribe(request)
         guard receipt.receipt.phase == .acknowledged, receipt.value != nil else {
             return .failure(.uncertain(code: "transcribeFailed"))
+        }
+        return .startedRun(receipt)
+    }
+
+    private func handlePhoto(_ request: WatchPhotoSendRequest) async -> WatchWireReply {
+        guard let sendPhoto else {
+            return .failure(.rejected(status: 404, sanitizedCode: "sendPhotoUnavailable"))
+        }
+        let receipt = await sendPhoto(request)
+        guard receipt.receipt.phase == .acknowledged, receipt.value != nil else {
+            return .failure(.uncertain(code: "sendPhotoFailed"))
         }
         return .startedRun(receipt)
     }
@@ -145,6 +167,8 @@ public struct WatchWireDispatcher: Sendable {
             return .runState(try await service.reconcile(run: run))
         case .diagnostics(let scope):
             return .diagnostics(try await service.diagnostics(scope: scope))
+        case .media(let descriptor):
+            return .media(try await service.media(descriptor))
         default:
             throw WatchCompanionError.unsupported(operation.kind)
         }

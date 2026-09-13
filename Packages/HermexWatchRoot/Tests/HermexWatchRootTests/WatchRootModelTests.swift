@@ -319,6 +319,32 @@ final class WatchRootModelTests: XCTestCase {
         XCTAssertEqual(model.lastErrorCode, "sendRejected")
     }
 
+    func testSendPhotoRecordsTheRunAfterPhoneSuccess() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        backend.sessionsByURL = [
+            "https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")],
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        let session = try XCTUnwrap(model.sessions.first)
+
+        let run = await model.sendPhoto(
+            image: Data(repeating: 0x5, count: 24),
+            filename: "watch-photo.jpg",
+            caption: "look",
+            to: session
+        )
+
+        XCTAssertNotNil(run)
+        XCTAssertNotNil(model.activeRun(for: session))
+        XCTAssertEqual(backend.startedAttachments?.count, 1)
+        XCTAssertEqual(backend.startedAttachments?.first?.path, "/tmp/workspace/watch-photo.jpg")
+        XCTAssertNil(model.lastErrorCode)
+    }
+
     func testUnpinnedWatchFollowsThePhoneActiveServerSwitch() async throws {
         let alphaAccount = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
         let betaAccount = WatchPhoneServerAccount(urlString: "https://beta.example", displayName: "Beta")
@@ -566,6 +592,10 @@ private struct UnavailableLink: WatchCompanionLinking {
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey> {
         throw WatchCompanionError.phoneUnavailable
     }
+
+    func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey> {
+        throw WatchCompanionError.phoneUnavailable
+    }
 }
 
 private struct ScriptedLink: WatchCompanionLinking {
@@ -576,6 +606,13 @@ private struct ScriptedLink: WatchCompanionLinking {
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey> {
         if let broker = service as? PhoneCompanionBroker {
             return await broker.sendVoiceNote(request)
+        }
+        throw WatchCompanionError.phoneUnavailable
+    }
+
+    func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey> {
+        if let broker = service as? PhoneCompanionBroker {
+            return await broker.sendPhoto(request)
         }
         throw WatchCompanionError.phoneUnavailable
     }
@@ -650,6 +687,10 @@ private final class ToggleableLink: WatchCompanionLinking, @unchecked Sendable {
         return service
     }
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey> {
+        throw WatchCompanionError.phoneUnavailable
+    }
+
+    func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey> {
         throw WatchCompanionError.phoneUnavailable
     }
 }

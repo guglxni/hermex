@@ -7,6 +7,7 @@ public protocol WatchCompanionLinking: Sendable {
     var isReachable: Bool { get }
     func makeService() -> any WatchCompanionServicing
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey>
+    func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey>
 }
 
 @MainActor
@@ -24,6 +25,7 @@ public final class WatchRootModel {
     private var link: (any WatchCompanionLinking)?
     private var activeRunBySession: [SessionKey: RunKey] = [:]
     private var fixtureTranscriptBySessionID: [String: [WatchTranscriptBlock]] = [:]
+    private var mediaCache: [String: Data] = [:]
     /// The watch has no server picker, so it follows whichever server the iPhone
     /// reports first (its active one). An explicit `select(_:)` pins the watch to
     /// that scope and stops the follow.
@@ -198,6 +200,53 @@ public final class WatchRootModel {
 
     public func sendVoiceNote(audio: Data, filename: String, to session: WatchSessionSummary) async -> RunKey? {
         await sendVoiceNote(audio: audio, filename: filename, to: session.key)
+    }
+
+    public func sendPhoto(image: Data, filename: String, caption: String, to session: WatchSessionSummary) async -> RunKey? {
+        await sendPhoto(image: image, filename: filename, caption: caption, to: session.key)
+    }
+
+    public func sendPhoto(image: Data, filename: String, caption: String, to key: SessionKey) async -> RunKey? {
+        guard canMutate, let link, let scope = selectedScope else { return nil }
+        do {
+            let request = try WatchPhotoSendRequest(
+                scope: scope,
+                expectedRevision: registryRevision,
+                session: key,
+                filename: filename,
+                image: image,
+                caption: caption
+            )
+            let receipt = try await link.sendPhoto(request)
+            if let run = receipt.value {
+                lastErrorCode = nil
+                await loadSessions()
+                activeRunBySession[key] = run
+                markLocalRun(on: key)
+                return run
+            }
+            lastErrorCode = "sendRejected"
+            return nil
+        } catch WatchPhotoValidationError.imageTooLarge {
+            lastErrorCode = "tooLarge"
+            return nil
+        } catch {
+            lastErrorCode = "sendFailed"
+            return nil
+        }
+    }
+
+    public func mediaBytes(for descriptor: WatchMediaDescriptor) async -> Data? {
+        let cacheKey = descriptor.handle.rawValue
+        if let cached = mediaCache[cacheKey] { return cached }
+        guard let link else { return nil }
+        do {
+            let payload = try await link.makeService().media(descriptor)
+            mediaCache[cacheKey] = payload.bytes
+            return payload.bytes
+        } catch {
+            return nil
+        }
     }
 
     public func sendVoiceNote(audio: Data, filename: String, to key: SessionKey) async -> RunKey? {
@@ -386,6 +435,8 @@ public final class WatchRootModel {
             return "Couldn’t send. Try again."
         case "sendRejected":
             return "Hermex didn’t accept that message."
+        case "tooLarge":
+            return "That photo is too large to send from Apple Watch."
         case "createFailed":
             return "Couldn’t create a session. Try again."
         case "createRejected":

@@ -108,6 +108,8 @@ public enum WatchWireMessage: Hashable, Codable, Sendable {
     case mutation(WatchMutationRequest)
     case transcribe(WatchVoiceNoteRequest)
     case transcribeFile(WatchVoiceNoteFileRef)
+    case sendPhoto(WatchPhotoSendRequest)
+    case sendPhotoFile(WatchPhotoFileRef)
 }
 
 public enum WatchWireReply: Hashable, Codable, Sendable {

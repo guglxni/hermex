@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -16,6 +17,12 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         var generationByServer: [ServerID: UInt64]
         var lastSnapshot: RegistrySnapshot?
         var issuedRuns: [String: RunKey]
+        var mediaByHandle: [String: CachedMedia]
+    }
+
+    private struct CachedMedia {
+        let path: String
+        let bytes: Data
     }
 
     public init(
@@ -32,7 +39,8 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
             urlByServer: [:],
             generationByServer: [:],
             lastSnapshot: nil,
-            issuedRuns: [:]
+            issuedRuns: [:],
+            mediaByHandle: [:]
         ))
     }
 
@@ -137,14 +145,48 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
             before: before,
             limit: limit
         )
-        let blocks = page.blocks.prefix(50).map { block -> WatchTranscriptBlock in
-            .text(id: block.id, role: block.role, text: block.text)
+        var projected: [WatchTranscriptBlock] = []
+        var imagesProjected = 0
+        for block in page.blocks.prefix(50) {
+            guard projected.count < 50 else { break }
+            switch block.kind {
+            case .text(let role, let text):
+                projected.append(.text(id: block.id, role: role, text: text))
+            case .code(let language, let text, let isTruncated):
+                projected.append(.code(id: block.id, language: language, text: text, isTruncated: isTruncated))
+            case .tool(let title, let state, let summary):
+                projected.append(.tool(id: block.id, title: title, state: state, summary: summary))
+            case .image(let path, let mime, let alt):
+                if imagesProjected < 4,
+                   let path,
+                   let image = await projectImage(
+                    session: key,
+                    urlString: urlString,
+                    id: block.id,
+                    path: path,
+                    mime: mime,
+                    alt: alt
+                   ) {
+                    projected.append(image)
+                    imagesProjected += 1
+                } else {
+                    projected.append(
+                        .unsupported(
+                            id: block.id,
+                            kind: "image",
+                            summary: alt ?? "Image — open on iPhone"
+                        )
+                    )
+                }
+            case .unsupported(let kind, let summary):
+                projected.append(.unsupported(id: block.id, kind: kind, summary: summary))
+            }
         }
         return try scoped(
             key.scope,
             WatchTranscript(
                 session: key,
-                blocks: Array(blocks),
+                blocks: projected,
                 nextBefore: page.nextBefore,
                 isTruncated: page.isTruncated || page.blocks.count > 50
             )
@@ -310,6 +352,50 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         }
     }
 
+    /// Upload a watch photo and start chat on the same composer attachment path.
+    public func sendPhoto(_ request: WatchPhotoSendRequest) async -> CommandReceipt<RunKey> {
+        let context = photoContext(for: request)
+        guard WatchMutationOperation.currentlyEnabledKinds.contains(.send) else {
+            return rejected(context, kind: .send)
+        }
+        guard request.session.scope == request.scope,
+              let urlString = try? resolvedURL(for: request.scope),
+              matchesRevision(request.expectedRevision)
+        else {
+            return rejected(context, kind: .send)
+        }
+        do {
+            let uploaded = try await backend.uploadFile(
+                urlString: urlString,
+                sessionID: request.session.sessionID,
+                data: request.image,
+                filename: request.filename
+            )
+            let message = WatchTranscriptProjection.chatMessageText(
+                draft: request.caption,
+                attachments: [uploaded]
+            )
+            let streamID = try await backend.startChat(
+                urlString: urlString,
+                sessionID: request.session.sessionID,
+                message: message,
+                attachments: [uploaded]
+            )
+            let run = try RunKey(session: request.session, streamID: streamID)
+            recordIssuedRun(run)
+            let receipt = try MutationReceipt(
+                context: context,
+                operationKind: .send,
+                phase: .acknowledged,
+                updatedAt: now(),
+                nonSecretResultID: streamID
+            )
+            return CommandReceipt(receipt: receipt, value: run)
+        } catch {
+            return rejected(context, kind: .send)
+        }
+    }
+
     public func transcribeVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> String {
         guard let urlString = try? resolvedURL(for: request.scope),
               matchesRevision(request.expectedRevision)
@@ -320,6 +406,17 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
             urlString: urlString,
             data: request.audio,
             filename: request.filename
+        )
+    }
+
+    private func photoContext(for request: WatchPhotoSendRequest) -> CommandContext {
+        let created = now()
+        return try! CommandContext(
+            stableCommandID: CommandID(rawValue: UUID()),
+            scope: request.scope,
+            expectedRevision: request.expectedRevision,
+            createdAt: created,
+            expiresAt: created.addingTimeInterval(60)
         )
     }
 
@@ -465,7 +562,23 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
     }
 
     public func media(_ descriptor: WatchMediaDescriptor) async throws -> WatchMediaPayload {
-        throw WatchCompanionError.unsupported(.media)
+        let urlString = try resolvedURL(for: descriptor.scope)
+        if let cached = storage.withLock({ $0.mediaByHandle[descriptor.handle.rawValue] }),
+           cached.bytes.count == descriptor.byteSize {
+            return try WatchMediaPayload(descriptor: descriptor, bytes: cached.bytes)
+        }
+        let path = storage.withLock({ $0.mediaByHandle[descriptor.handle.rawValue]?.path })
+            ?? descriptor.handle.rawValue
+        let raw = try await backend.mediaData(
+            urlString: urlString,
+            sessionID: descriptor.session.sessionID,
+            path: path
+        )
+        guard let bytes = WatchImageThumbnail.jpeg(from: raw) ?? (raw.count <= WatchImageThumbnail.watchFaceMaxBytes ? raw : nil) else {
+            throw WatchCompanionError.backend(.invalidResponse)
+        }
+        cacheMedia(handle: descriptor.handle.rawValue, path: path, bytes: bytes)
+        return try WatchMediaPayload(descriptor: descriptor, bytes: bytes)
     }
 
     public func bots(scope: ServerScope) async throws -> ScopedSnapshot<[WatchBotSummary]> {
@@ -490,6 +603,63 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
 
     public func interruptBot(key: BotKey, context: CommandContext) async -> CommandReceipt<EmptyValue> {
         rejected(context, kind: .interruptBot)
+    }
+
+    private func projectImage(
+        session: SessionKey,
+        urlString: String,
+        id: String,
+        path: String,
+        mime: String?,
+        alt: String?
+    ) async -> WatchTranscriptBlock? {
+        guard !path.hasPrefix("http://"), !path.hasPrefix("https://") else { return nil }
+        do {
+            let raw = try await backend.mediaData(
+                urlString: urlString,
+                sessionID: session.sessionID,
+                path: path
+            )
+            guard let bytes = WatchImageThumbnail.jpeg(from: raw) else { return nil }
+            let handle = try mediaHandle(for: path)
+            let observed = now()
+            let digest = sha256Hex(bytes)
+            let descriptor = try WatchMediaDescriptor(
+                scope: session.scope,
+                session: session,
+                origin: OriginBinding(digest: sha256Hex(Data(path.utf8))),
+                handle: handle,
+                mimeType: "image/jpeg",
+                byteSize: bytes.count,
+                sha256: digest,
+                observedAt: observed,
+                expiresAt: observed.addingTimeInterval(120)
+            )
+            cacheMedia(handle: handle.rawValue, path: path, bytes: bytes)
+            return .image(id: id, descriptor: descriptor, alt: alt)
+        } catch {
+            return nil
+        }
+    }
+
+    private func mediaHandle(for path: String) throws -> MediaHandle {
+        if path.utf8.count <= ContractLimits.identifierUTF8Bytes {
+            return try MediaHandle(path)
+        }
+        return try MediaHandle(sha256Hex(Data(path.utf8)))
+    }
+
+    private func cacheMedia(handle: String, path: String, bytes: Data) {
+        storage.withLock { state in
+            if state.mediaByHandle.count >= 16 {
+                state.mediaByHandle.removeAll()
+            }
+            state.mediaByHandle[handle] = CachedMedia(path: path, bytes: bytes)
+        }
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func registryIdentity(_ entries: [RegistryEntry]) -> [String] {

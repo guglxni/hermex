@@ -125,18 +125,18 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
             messageBefore: before
         ).session
         let messages = detail?.messages ?? []
-        let blocks = messages.suffix(limit).map { message in
-            WatchPhoneTranscriptPage.Block(
-                id: message.id,
-                role: Self.role(from: message.role),
-                text: message.content ?? ""
-            )
+        let blocks = messages.suffix(limit).flatMap { message in
+            WatchTranscriptProjection.blocks(for: Self.hint(from: message))
         }
         return WatchPhoneTranscriptPage(
             blocks: Array(blocks),
             nextBefore: detail?.messagesOffset,
             isTruncated: detail?.messagesTruncated == true
         )
+    }
+
+    func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
+        try await client(for: urlString).mediaData(sessionID: sessionID, path: path)
     }
 
     func transcribeAudio(urlString: String, data: Data, filename: String) async throws -> String {
@@ -201,6 +201,64 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         )
     }
 
+    private static func hint(from message: ChatMessage) -> WatchPhoneMessageHint {
+        let rawRole = message.role?.lowercased()
+        let isToolResult = rawRole == "tool"
+        let attachments = (message.attachments ?? []).map { attachment in
+            WatchPhoneAttachmentHint(
+                name: attachment.name ?? URL(fileURLWithPath: attachment.path ?? "file").lastPathComponent,
+                path: attachment.path,
+                mime: attachment.mime,
+                isImage: attachment.isImage == true || Self.isImagePath(attachment.path ?? attachment.name)
+            )
+        }
+        let tools: [WatchPhoneToolHint]
+        if isToolResult {
+            tools = [
+                WatchPhoneToolHint(
+                    title: message.name ?? "Tool",
+                    state: "done",
+                    summary: message.content
+                ),
+            ]
+        } else {
+            tools = Self.toolHints(from: message.toolCalls)
+        }
+        return WatchPhoneMessageHint(
+            id: message.id,
+            role: role(from: message.role),
+            text: message.content ?? "",
+            attachments: attachments,
+            tools: tools,
+            isToolResult: isToolResult
+        )
+    }
+
+    private static func toolHints(from calls: [JSONValue]?) -> [WatchPhoneToolHint] {
+        (calls ?? []).compactMap { call in
+            guard case .object(let object) = call else { return nil }
+            let function = object["function"].flatMap { value -> [String: JSONValue]? in
+                if case .object(let nested) = value { return nested }
+                return nil
+            }
+            let title = object["name"]?.lossyString
+                ?? function?["name"]?.lossyString
+                ?? "Tool"
+            let state = object["status"]?.lossyString
+                ?? object["state"]?.lossyString
+                ?? "called"
+            let summary = object["summary"]?.lossyString
+                ?? function?["arguments"]?.lossyString
+            return WatchPhoneToolHint(title: title, state: state, summary: summary)
+        }
+    }
+
+    private static func isImagePath(_ value: String?) -> Bool {
+        guard let value else { return false }
+        let ext = URL(fileURLWithPath: value).pathExtension.lowercased()
+        return ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif"].contains(ext)
+    }
+
     private static func role(from raw: String?) -> WatchMessageRole {
         switch raw?.lowercased() {
         case "assistant": return .assistant
@@ -221,6 +279,17 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
             return .authRequired
         default:
             return .unknown
+        }
+    }
+}
+
+private extension JSONValue {
+    var lossyString: String? {
+        switch self {
+        case .string(let value):
+            return value
+        default:
+            return nil
         }
     }
 }

@@ -46,14 +46,24 @@ public struct WatchPhoneSessionRow: Sendable, Equatable {
 
 public struct WatchPhoneTranscriptPage: Sendable, Equatable {
     public struct Block: Sendable, Equatable {
+        public enum Kind: Sendable, Equatable {
+            case text(role: WatchMessageRole, text: String)
+            case code(language: String?, text: String, isTruncated: Bool)
+            case tool(title: String, state: String, summary: String?)
+            case image(path: String?, mime: String?, alt: String?)
+            case unsupported(kind: String, summary: String)
+        }
+
         public let id: String
-        public let role: WatchMessageRole
-        public let text: String
+        public let kind: Kind
+
+        public init(id: String, kind: Kind) {
+            self.id = id
+            self.kind = kind
+        }
 
         public init(id: String, role: WatchMessageRole, text: String) {
-            self.id = id
-            self.role = role
-            self.text = text
+            self.init(id: id, kind: .text(role: role, text: text))
         }
     }
 
@@ -65,6 +75,57 @@ public struct WatchPhoneTranscriptPage: Sendable, Equatable {
         self.blocks = blocks
         self.nextBefore = nextBefore
         self.isTruncated = isTruncated
+    }
+}
+
+public struct WatchPhoneAttachmentHint: Sendable, Equatable {
+    public let name: String
+    public let path: String?
+    public let mime: String?
+    public let isImage: Bool
+
+    public init(name: String, path: String?, mime: String?, isImage: Bool) {
+        self.name = name
+        self.path = path
+        self.mime = mime
+        self.isImage = isImage
+    }
+}
+
+public struct WatchPhoneToolHint: Sendable, Equatable {
+    public let title: String
+    public let state: String
+    public let summary: String?
+
+    public init(title: String, state: String, summary: String?) {
+        self.title = title
+        self.state = state
+        self.summary = summary
+    }
+}
+
+public struct WatchPhoneMessageHint: Sendable, Equatable {
+    public let id: String
+    public let role: WatchMessageRole
+    public let text: String
+    public let attachments: [WatchPhoneAttachmentHint]
+    public let tools: [WatchPhoneToolHint]
+    public let isToolResult: Bool
+
+    public init(
+        id: String,
+        role: WatchMessageRole,
+        text: String,
+        attachments: [WatchPhoneAttachmentHint] = [],
+        tools: [WatchPhoneToolHint] = [],
+        isToolResult: Bool = false
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.attachments = attachments
+        self.tools = tools
+        self.isToolResult = isToolResult
     }
 }
 
@@ -108,6 +169,7 @@ public protocol WatchPhoneBackend: Sendable {
     func transcript(urlString: String, sessionID: String, before: Int?, limit: Int) async throws -> WatchPhoneTranscriptPage
     func runPhase(urlString: String, sessionID: String, streamID: String) async throws -> (phase: WatchRunPhase, isTerminal: Bool)
     func transcribeAudio(urlString: String, data: Data, filename: String) async throws -> String
+    func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data
 }
 
 public extension WatchPhoneBackend {
@@ -127,5 +189,9 @@ public extension WatchPhoneBackend {
         filename: String
     ) async throws -> WatchChatAttachment {
         throw WatchCompanionError.backend(.invalidResponse)
+    }
+
+    func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
+        throw WatchCompanionError.unsupported(.media)
     }
 }

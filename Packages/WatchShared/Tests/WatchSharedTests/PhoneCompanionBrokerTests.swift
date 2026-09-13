@@ -24,6 +24,8 @@ import Testing
         var transcribedFilenames: [String] = []
         var uploaded: [(sessionID: String, filename: String, bytes: Int)] = []
         var startedChats: [(sessionID: String, message: String, attachments: [WatchChatAttachment]?)] = []
+        var mediaByPath: [String: Data] = [:]
+        var uploadedIsImage = false
 
         init(
             accounts: [WatchPhoneServerAccount],
@@ -69,10 +71,16 @@ import Testing
             return WatchChatAttachment(
                 name: filename,
                 path: "/tmp/workspace/\(filename)",
-                mime: "audio/m4a",
+                mime: uploadedIsImage ? "image/jpeg" : "audio/m4a",
                 size: data.count,
-                isImage: false
+                isImage: uploadedIsImage
             )
+        }
+        func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
+            guard let data = mediaByPath[path] else {
+                throw WatchCompanionError.backend(.invalidResponse)
+            }
+            return data
         }
         func cancelChat(urlString: String, streamID: String) async throws { cancelledStreamIDs.append(streamID) }
         func transcript(urlString: String, sessionID: String, before: Int?, limit: Int) async throws -> WatchPhoneTranscriptPage { transcriptPage }
@@ -485,5 +493,125 @@ import Testing
         #expect(first == second)
         #expect(first != other)
         #expect(first.rawValue.uuidString.contains("://") == false)
+    }
+
+    @Test func transcriptProjectsCodeToolAndHonestImageFallback() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: [
+                WatchPhoneSessionRow(
+                    sessionID: "s1",
+                    title: "Planning",
+                    profile: nil,
+                    workspaceLabel: nil,
+                    updatedAt: nil,
+                    isPinned: false,
+                    isArchived: false,
+                    attention: false,
+                    runState: nil
+                ),
+            ]
+        )
+        backend.transcriptPage = WatchPhoneTranscriptPage(
+            blocks: [
+                WatchPhoneTranscriptPage.Block(id: "c1", kind: .code(language: "swift", text: "let x = 1", isTruncated: false)),
+                WatchPhoneTranscriptPage.Block(id: "t1", kind: .tool(title: "read", state: "done", summary: "ok")),
+                WatchPhoneTranscriptPage.Block(id: "i1", kind: .image(path: "/tmp/missing.png", mime: "image/png", alt: "shot")),
+            ],
+            nextBefore: nil,
+            isTruncated: false
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let transcript = try await broker.transcript(
+            key: try SessionKey(scope: scope, sessionID: "s1"),
+            before: nil,
+            limit: 20
+        )
+        #expect(transcript.value.blocks.count == 3)
+        guard case .code(_, "swift", "let x = 1", false) = transcript.value.blocks[0] else {
+            Issue.record("expected a code block")
+            return
+        }
+        guard case .tool(_, "read", "done", "ok") = transcript.value.blocks[1] else {
+            Issue.record("expected a tool block")
+            return
+        }
+        guard case .unsupported(_, "image", let summary) = transcript.value.blocks[2] else {
+            Issue.record("expected an honest image fallback")
+            return
+        }
+        #expect(summary == "shot")
+    }
+
+    @Test func transcriptImageBecomesAMediaDescriptorWhenBytesFit() async throws {
+        let png = Data([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+            0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+            0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ])
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        backend.mediaByPath["/tmp/workspace/shot.png"] = png
+        backend.transcriptPage = WatchPhoneTranscriptPage(
+            blocks: [
+                WatchPhoneTranscriptPage.Block(
+                    id: "i1",
+                    kind: .image(path: "/tmp/workspace/shot.png", mime: "image/png", alt: "shot")
+                ),
+            ],
+            nextBefore: nil,
+            isTruncated: false
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "s1")
+        let transcript = try await broker.transcript(key: session, before: nil, limit: 20)
+        guard case .image(_, let descriptor, "shot") = transcript.value.blocks[0] else {
+            Issue.record("expected an image block")
+            return
+        }
+        let payload = try await broker.media(descriptor)
+        #expect(payload.bytes.count == descriptor.byteSize)
+        #expect(payload.descriptor.handle.rawValue == "/tmp/workspace/shot.png")
+    }
+
+    @Test func sendPhotoUploadsAndStartsChatOnTheComposerPath() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        backend.uploadedIsImage = true
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "s1")
+        let image = Data(repeating: 0x3, count: 24)
+        let request = try WatchPhotoSendRequest(
+            scope: scope,
+            expectedRevision: registry.revision,
+            session: session,
+            filename: "watch-photo.jpg",
+            image: image,
+            caption: "look"
+        )
+
+        let receipt = await broker.sendPhoto(request)
+
+        #expect(receipt.receipt.phase == .acknowledged)
+        #expect(receipt.value?.streamID == "stream-1")
+        #expect(backend.uploaded.map(\.filename) == ["watch-photo.jpg"])
+        #expect(backend.startedChats[0].message.contains("look"))
+        #expect(backend.startedChats[0].message.contains("[Attached files:"))
+        let attachments = try #require(backend.startedChats[0].attachments)
+        #expect(attachments[0].path == "/tmp/workspace/watch-photo.jpg")
+        #expect(attachments[0].isImage)
     }
 }

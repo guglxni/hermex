@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import HermexWatchRoot
 import WatchShared
@@ -11,6 +12,8 @@ struct WatchSpeakControls: View {
     @State private var capture = WatchVoiceCapture()
     @State private var recorder = WatchVoiceNoteRecorder()
     @State private var draft = ""
+    @State private var photoItem: PhotosPickerItem?
+    @State private var isSendingPhoto = false
 
     var listenAction: (() -> Void)?
 
@@ -72,13 +75,23 @@ struct WatchSpeakControls: View {
             TextField("Message", text: $draft, axis: .vertical)
                 .lineLimit(1...3)
                 .multilineTextAlignment(.center)
-            Button("Send") {
-                Task { await sendDraft() }
+            HStack(spacing: 8) {
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Text(isSendingPhoto ? "Sending photo" : "Photo")
+                }
+                .disabled(isSendingPhoto || !model.canMutate)
+                Button("Send") {
+                    Task { await sendDraft() }
+                }
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .frame(maxWidth: .infinity)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .frame(maxWidth: .infinity)
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task { await sendPickedPhoto(item) }
+        }
         .onChange(of: recorder.elapsed) { _, elapsed in
             if capture.phase == .recording, elapsed >= WatchVoiceCapturePolicy.maximumDuration {
                 Task { await finishVoice() }
@@ -173,6 +186,41 @@ struct WatchSpeakControls: View {
         } catch {
             try? FileManager.default.removeItem(at: clip.url)
             capture.fail(code: "speechUnavailable")
+            WatchHaptics.play(.failure)
+        }
+    }
+
+    private func sendPickedPhoto(_ item: PhotosPickerItem) async {
+        isSendingPhoto = true
+        defer {
+            isSendingPhoto = false
+            photoItem = nil
+        }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  let jpeg = WatchImageThumbnail.jpeg(
+                    from: data,
+                    maxPixelSize: WatchImageThumbnail.sendMaxPixelSize,
+                    maxBytes: WatchImageThumbnail.sendMaxBytes
+                  )
+            else {
+                WatchHaptics.play(.failure)
+                return
+            }
+            let caption = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            if await model.sendPhoto(
+                image: jpeg,
+                filename: "watch-photo-\(Int(Date().timeIntervalSince1970)).jpg",
+                caption: caption,
+                to: session
+            ) != nil {
+                draft = ""
+                WatchHaptics.play(.success)
+                WatchWidgetSnapshotPublisher.publish(model)
+            } else {
+                WatchHaptics.play(.failure)
+            }
+        } catch {
             WatchHaptics.play(.failure)
         }
     }

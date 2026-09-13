@@ -93,15 +93,11 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
     }
 
     public func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey> {
-        let reply = try await transport.send(.transcribe(request))
-        switch reply {
-        case .startedRun(let receipt):
-            return receipt
-        case .failure:
-            throw WatchCompanionError.backend(.invalidResponse)
-        default:
-            throw WatchCompanionError.backend(.invalidResponse)
-        }
+        try await startedRun(from: .transcribe(request))
+    }
+
+    public func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey> {
+        try await startedRun(from: .sendPhoto(request))
     }
 
     public func composerOptions(scope: ServerScope) async throws -> ScopedSnapshot<WatchComposerOptions> {
@@ -153,7 +149,7 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
         try await read(scope: scope, operation: .diagnostics(scope: scope))
     }
     public func media(_ descriptor: WatchMediaDescriptor) async throws -> WatchMediaPayload {
-        throw WatchCompanionError.unsupported(.media)
+        try await read(scope: descriptor.scope, operation: .media(descriptor))
     }
     public func bots(scope: ServerScope) async throws -> ScopedSnapshot<[WatchBotSummary]> {
         throw WatchCompanionError.unsupported(.bots)
@@ -196,6 +192,20 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
             return try cast(value)
         case (.diagnostics, .diagnostics(let value)):
             return try cast(value)
+        case (.media, .media(let value)):
+            return try cast(value)
+        default:
+            throw WatchCompanionError.backend(.invalidResponse)
+        }
+    }
+
+    private func startedRun(from message: WatchWireMessage) async throws -> CommandReceipt<RunKey> {
+        let reply = try await transport.send(message)
+        switch reply {
+        case .startedRun(let receipt):
+            return receipt
+        case .failure:
+            throw WatchCompanionError.backend(.invalidResponse)
         default:
             throw WatchCompanionError.backend(.invalidResponse)
         }

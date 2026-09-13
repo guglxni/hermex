@@ -14,9 +14,15 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
             epoch: WatchInstallationIdentity.epoch(),
             backend: APIClientWatchPhoneBackend()
         )
-        dispatcher = WatchWireDispatcher(service: broker) { request in
-            await broker.sendVoiceNote(request)
-        }
+        dispatcher = WatchWireDispatcher(
+            service: broker,
+            transcribe: { request in
+                await broker.sendVoiceNote(request)
+            },
+            sendPhoto: { request in
+                await broker.sendPhoto(request)
+            }
+        )
         super.init()
     }
 
@@ -55,14 +61,20 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
     }
 
     func session(_ session: WCSession, didReceive file: WCSessionFile) {
-        guard let raw = file.metadata?[WatchVoiceNoteWire.fileTransferMetadataKey] as? String,
-              let transferID = UUID(uuidString: raw),
+        let voiceID = (file.metadata?[WatchVoiceNoteWire.fileTransferMetadataKey] as? String)
+            .flatMap(UUID.init(uuidString:))
+        let photoID = (file.metadata?[WatchPhotoWire.fileTransferMetadataKey] as? String)
+            .flatMap(UUID.init(uuidString:))
+        guard let transferID = voiceID ?? photoID,
               let data = try? Data(contentsOf: file.fileURL),
-              !data.isEmpty,
-              data.count <= WatchVoiceNoteRequest.maximumAudioBytes
+              !data.isEmpty
         else {
             return
         }
+        let maximum = voiceID != nil
+            ? WatchVoiceNoteRequest.maximumAudioBytes
+            : WatchPhotoSendRequest.maximumImageBytes
+        guard data.count <= maximum else { return }
         Task { await voiceInbox.deposit(transferID: transferID, data: data) }
     }
 
@@ -79,16 +91,27 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
     }
 
     private func resolveFileHop(_ message: WatchWireMessage) async -> WatchWireMessage {
-        guard case .transcribeFile(let ref) = message else { return message }
-        do {
-            let audio = try await takeVoiceFile(transferID: ref.transferID)
-            return .transcribe(try ref.makeRequest(audio: audio))
-        } catch {
+        switch message {
+        case .transcribeFile(let ref):
+            do {
+                let audio = try await takeTransferredFile(transferID: ref.transferID)
+                return .transcribe(try ref.makeRequest(audio: audio))
+            } catch {
+                return message
+            }
+        case .sendPhotoFile(let ref):
+            do {
+                let image = try await takeTransferredFile(transferID: ref.transferID)
+                return .sendPhoto(try ref.makeRequest(image: image))
+            } catch {
+                return message
+            }
+        default:
             return message
         }
     }
 
-    private func takeVoiceFile(transferID: UUID) async throws -> Data {
+    private func takeTransferredFile(transferID: UUID) async throws -> Data {
         try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask { try await self.voiceInbox.take(transferID: transferID) }
             group.addTask {

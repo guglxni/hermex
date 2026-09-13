@@ -22,6 +22,22 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
     }
 
     func transferVoiceFile(at url: URL, transferID: UUID) async throws {
+        try await transferFile(
+            at: url,
+            transferID: transferID,
+            metadataKey: WatchVoiceNoteWire.fileTransferMetadataKey
+        )
+    }
+
+    func transferPhotoFile(at url: URL, transferID: UUID) async throws {
+        try await transferFile(
+            at: url,
+            transferID: transferID,
+            metadataKey: WatchPhotoWire.fileTransferMetadataKey
+        )
+    }
+
+    private func transferFile(at url: URL, transferID: UUID, metadataKey: String) async throws {
         guard WCSession.isSupported() else {
             throw WatchCompanionError.phoneUnavailable
         }
@@ -31,7 +47,7 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
             lock.unlock()
             _ = WCSession.default.transferFile(
                 url,
-                metadata: [WatchVoiceNoteWire.fileTransferMetadataKey: transferID.uuidString]
+                metadata: [metadataKey: transferID.uuidString]
             )
         }
     }
@@ -57,9 +73,9 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
     }
 
     func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
-        guard let raw = fileTransfer.file.metadata?[WatchVoiceNoteWire.fileTransferMetadataKey] as? String,
-              let transferID = UUID(uuidString: raw)
-        else {
+        let raw = fileTransfer.file.metadata?[WatchVoiceNoteWire.fileTransferMetadataKey] as? String
+            ?? fileTransfer.file.metadata?[WatchPhotoWire.fileTransferMetadataKey] as? String
+        guard let raw, let transferID = UUID(uuidString: raw) else {
             return
         }
         lock.lock()
@@ -89,6 +105,10 @@ struct WatchConnectivitySessionLink: WatchCompanionLinking {
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey> {
         try await WatchWireClient(transport: WCSessionTransport()).sendVoiceNote(request)
     }
+
+    func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey> {
+        try await WatchWireClient(transport: WCSessionTransport()).sendPhoto(request)
+    }
 }
 
 struct WCSessionTransport: WatchWireTransporting {
@@ -98,6 +118,9 @@ struct WCSessionTransport: WatchWireTransporting {
         }
         if case .transcribe(let request) = message, WatchVoiceNoteWire.requiresFileTransfer(request) {
             return try await sendTranscribeViaFile(request)
+        }
+        if case .sendPhoto(let request) = message, WatchPhotoWire.requiresFileTransfer(request) {
+            return try await sendPhotoViaFile(request)
         }
         return try await sendInline(message)
     }
@@ -110,6 +133,16 @@ struct WCSessionTransport: WatchWireTransporting {
         defer { try? FileManager.default.removeItem(at: url) }
         try await WatchSessionActivator.shared.transferVoiceFile(at: url, transferID: transferID)
         return try await sendInline(.transcribeFile(try request.fileRef(transferID: transferID)))
+    }
+
+    private func sendPhotoViaFile(_ request: WatchPhotoSendRequest) async throws -> WatchWireReply {
+        let transferID = UUID()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(transferID.uuidString).jpg")
+        try request.image.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await WatchSessionActivator.shared.transferPhotoFile(at: url, transferID: transferID)
+        return try await sendInline(.sendPhotoFile(try request.fileRef(transferID: transferID)))
     }
 
     private func sendInline(_ message: WatchWireMessage) async throws -> WatchWireReply {

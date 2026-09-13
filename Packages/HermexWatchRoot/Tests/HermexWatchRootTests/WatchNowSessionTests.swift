@@ -38,6 +38,15 @@ final class WatchNowSessionTests: XCTestCase {
         XCTAssertTrue(preview?.hasSuffix("…") == true)
     }
 
+    func testLastAssistantPreviewIgnoresCodeAndToolRows() {
+        let blocks: [WatchTranscriptBlock] = [
+            .code(id: "c", language: "swift", text: "let x = 1", isTruncated: false),
+            .tool(id: "t", title: "read", state: "done", summary: "ok"),
+            .text(id: "2", role: .assistant, text: "Ready."),
+        ]
+        XCTAssertEqual(WatchTranscriptPreview.lastAssistantText(in: blocks), "Ready.")
+    }
+
     private func makeScope() throws -> ServerScope {
         ServerScope(
             epoch: InstallationEpoch(rawValue: UUID()),
