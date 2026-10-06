@@ -28,7 +28,9 @@ import Foundation
 /// `limit` is clamped to 1-100, there is no offset, and a job without runs answers `{runs: []}`.
 /// The Kanban plugin's reads (#1043), its event socket (#1045) and its writes (#1044) are under
 /// `/api/plugins/kanban` at the same pin, checked against `scripts/local-hermes`;
-/// `docs/agents/kanban.md` § Hermes has their shapes.
+/// `docs/agents/kanban.md` § Hermes has their shapes. `POST /api/audio/speak` (#1072) is read
+/// at the same pin and checked against `scripts/local-hermes`: `{text}` only, spoken by the
+/// Profile's `tts.provider`, answered `{ok, data_url, mime_type, provider}`, or `{detail}`.
 enum HermesREST: Equatable, Sendable {
     /// Public, so it reads the host before any credential is sent.
     case status
@@ -80,6 +82,8 @@ enum HermesREST: Equatable, Sendable {
     case cronDeliveryTargets(profile: String?)
     /// One Profile's skills: a bare array of `{name, description, category, enabled, …}`.
     case skills(profile: String?)
+    /// Speaks `text` in `profile`'s voice: the audio as a base64 data URL (`BotClient.speech`).
+    case speak(text: String, profile: String)
     /// `{default_tenant, …}`, or 404 when the Kanban plugin is disabled or absent.
     case kanbanConfig
     /// Every Board with its counts, and `current`.
@@ -183,6 +187,9 @@ enum HermesREST: Equatable, Sendable {
         case .cronDeliveryTargets(let profile):
             return Self.get(try Self.url(base, "api/cron/delivery-targets", profile: profile))
         case .skills(let profile): return Self.get(try Self.url(base, "api/skills", profile: profile))
+        case .speak(let text, let profile):
+            guard !profile.isEmpty else { throw BotFailure.invalidAddress }
+            return try Self.send("POST", try Self.url(base, "api/audio/speak", profile: profile), ["text": .string(text)])
         case .kanbanConfig: return try Self.kanban(base, ["config"])
         case .kanbanBoards: return try Self.kanban(base, ["boards"])
         case .kanbanBoard(let board, let tenant, let includeArchived):
