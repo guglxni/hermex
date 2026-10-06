@@ -29,6 +29,10 @@ import Foundation
 /// The Kanban plugin's reads (#1043), its event socket (#1045) and its writes (#1044) are under
 /// `/api/plugins/kanban` at the same pin, checked against `scripts/local-hermes`;
 /// `docs/agents/kanban.md` § Hermes has their shapes.
+/// Dictation's `POST /api/audio/transcribe` (#1071) is read at the same pin and checked against
+/// `scripts/local-hermes`: JSON, not multipart; `{ok, transcript, provider}`, with silence an
+/// empty transcript; and `{detail}` for a refusal or a provider failure (400), an unknown
+/// Profile (404) or an unexpected failure (500).
 enum HermesREST: Equatable, Sendable {
     /// Public, so it reads the host before any credential is sent.
     case status
@@ -44,6 +48,9 @@ enum HermesREST: Equatable, Sendable {
     case deleteProfile(name: String)
     /// Stores image bytes under the Profile. The returned path travels in one prompt.
     case uploadImage(profile: String, filename: String, dataURL: String)
+    /// One recording for `profile`'s speech-to-text: `dataURL` is base64 of up to 25 MiB of
+    /// audio, and `mimeType` an `audio/*` type.
+    case transcribe(profile: String, dataURL: String, mimeType: String)
     /// One session-scoped file download. `path` is checked against the address.
     case downloadArtifact(path: String, profile: String, sessionID: String)
     /// Writes one managed environment value at the host root.
@@ -134,6 +141,9 @@ enum HermesREST: Equatable, Sendable {
             parts.queryItems = [URLQueryItem(name: "profile", value: profile)]
             guard let url = parts.url else { throw BotFailure.invalidAddress }
             return try Self.send("POST", url, ["filename": .string(filename), "data_url": .string(dataURL)])
+        case .transcribe(let profile, let dataURL, let mimeType):
+            return try Self.send("POST", try Self.url(base, "api/audio/transcribe", profile: profile),
+                                 ["data_url": .string(dataURL), "mime_type": .string(mimeType)])
         case .downloadArtifact(let path, let profile, let sessionID):
             guard !profile.isEmpty, !sessionID.isEmpty else { throw BotArtifactFailure.invalidReference }
             let path = try BotArtifactReference.path(path, address: base)
