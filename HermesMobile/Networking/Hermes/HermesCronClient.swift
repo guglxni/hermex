@@ -106,11 +106,7 @@ import Foundation
 
     /// A disabled skill comes back `disabled`, which the editor leaves out.
     func cronSkills(profile: String?) async throws -> [SkillSummary] {
-        (try Self.json(try await send(.skills(profile: profile))).list ?? []).compactMap { row in
-            guard let name = row["name"].text, !name.isEmpty else { return nil }
-            return SkillSummary(name: name, category: row["category"].text, description: row["description"].text,
-                                path: nil, disabled: row["enabled"].flag.map { !$0 })
-        }
+        try HermesSkillsClient.skills(try await send(.skills(profile: profile)))
     }
 
     // The screens never ask a Hermes host for these (`cronFeatures`): its recent runs come with
@@ -167,7 +163,8 @@ import Foundation
     /// parse or a Task that is gone, reads as that reason. Hermes never answers 403, 502-504
     /// or 520-530 itself, so those get the Hermes connection's copy for the proxy or tunnel
     /// in front of it. Any other status is `APIError.http`, whose 500 is the host's unhandled error.
-    private static func accepted(_ reply: (body: Data, status: Int)) throws -> Data {
+    /// `HermesSkillsClient` reads its replies through it too.
+    static func accepted(_ reply: (body: Data, status: Int)) throws -> Data {
         switch reply.status {
         case 200..<300: return reply.body
         case 403, 502...504, 520...530: throw BotFailure.rejected(reply.status)
@@ -197,7 +194,7 @@ import Foundation
     }()
 }
 
-/// A Tasks request a Hermes host refused with its reason (`{detail}`).
+/// A Tasks or Skills request a Hermes host refused with its reason (`{detail}`).
 struct HermesCronRefusal: LocalizedError, Equatable {
     let detail: String
     var errorDescription: String? { String(localized: "The server rejected the request: \(detail)") }

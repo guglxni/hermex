@@ -1106,6 +1106,19 @@ outcome (a finished Run Now's, or a refresh whose runs read failed) until the ne
 detail's latest output is that run's reply, read only when it failed. A page without its
 `runs` list is a failed read. Nothing reads `/api/fs/*`.
 
+## Skills on a Hermes host
+
+The Skills screens run on a Hermes host through `HermesSkillsClient` (#1069), the
+`SkillsDataClient` beside webui's `APIClient`, bound to the inbox's selected Profile, which
+the screen's subtitle names. It reads `GET /api/skills?profile=`, a bare array with disabled
+skills included, whose `enabled` becomes the app's `disabled` (the Tasks editor's skill list
+shares that decode), and `GET /api/skills/content?name=&profile=`. A toggle is
+`PUT /api/skills/toggle` with `{name, enabled, profile}` in the body, where the host reads the
+Profile first; a refusal rolls the row back and shows the host's `detail`, and a missing skill
+is a 404 `{detail}`. The content reply's `path` is a host path and is never decoded. The host
+sends no tags or linked files (`SkillsFeatures.hermes`), and has create and edit routes the
+app does not use. The temporary entry is the inbox's + menu (DEBUG and Hermex Branch), until #709.
+
 ## Opening a bot from outside the app
 
 One URL route lands on a bot conversation: `hermes-agent://bot?server=…&
