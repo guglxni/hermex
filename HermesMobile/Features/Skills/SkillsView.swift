@@ -23,8 +23,7 @@ struct SkillsView: View {
     var body: some View {
         content
             .adaptiveReadableScrollContent(maxWidth: AdaptiveReadableContentWidth.secondaryDestination)
-            .navigationTitle("Skills")
-            .modifier(SkillsProfileSubtitle(profile: profile))
+            .modifier(SkillsTitle(profile: profile))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -406,15 +405,20 @@ struct SkillDetailView: View {
     }
 }
 
-/// The Profile a Hermes host's Skills list is for, under its title on iOS 26.
-private struct SkillsProfileSubtitle: ViewModifier {
+/// Titles the Skills list. On a Hermes host it also names the Profile the list is for: under
+/// the title on iOS 26, and in the title before that.
+private struct SkillsTitle: ViewModifier {
     let profile: String?
 
     func body(content: Content) -> some View {
-        if #available(iOS 26, *), let profile {
-            content.navigationSubtitle(profile)
+        if let profile {
+            if #available(iOS 26, *) {
+                content.navigationTitle("Skills").navigationSubtitle(profile)
+            } else {
+                content.navigationTitle(Text("Skills · \(profile)"))
+            }
         } else {
-            content
+            content.navigationTitle("Skills")
         }
     }
 }
