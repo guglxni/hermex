@@ -35,10 +35,11 @@ import Foundation
     }
 
     /// `GET /api/skills`'s bare array as the app's skills: each one `disabled` when the host lists
-    /// it not `enabled`, and a row without a name left out. The Tasks editor reads its skills
-    /// through it too (`HermesCronClient.cronSkills`).
+    /// it not `enabled`, and a row without a name left out. A reply that is not an array is a
+    /// failed read, not an empty Profile. The Tasks editor reads its skills through it too
+    /// (`HermesCronClient.cronSkills`).
     static func skills(_ body: Data) throws -> [SkillSummary] {
-        (try decode(BotJSON.self, body).list ?? []).compactMap { row in
+        try decode([BotJSON].self, body).compactMap { row in
             guard let name = row["name"].text, !name.isEmpty else { return nil }
             return SkillSummary(name: name, category: row["category"].text, description: row["description"].text,
                                 path: nil, disabled: row["enabled"].flag.map { !$0 })

@@ -33,6 +33,21 @@ import XCTest
         XCTAssertEqual(request.url?.query, "profile=research")
     }
 
+    func testAListThatIsNotAnArrayIsAFailedReadNotAnEmptyProfile() async throws {
+        let client = Self.client { request in
+            request.url?.path == "/api/skills" ? .json(200, .object([
+                "skills": .array([.object(["name": .string("arxiv"), "enabled": .bool(true)])])
+            ])) : nil
+        }
+
+        do {
+            let response = try await client.skills()
+            XCTFail("Expected a failed read, got \(response.skills?.count ?? 0) skills")
+        } catch {
+            guard case APIError.decoding = error else { return XCTFail("Expected a decoding failure, got \(error)") }
+        }
+    }
+
     func testATogglePutsTheNameStateAndProfileInTheBody() async throws {
         let client = Self.client { request in
             request.url?.path == "/api/skills/toggle" && request.httpMethod == "PUT"
