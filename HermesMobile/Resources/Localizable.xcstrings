@@ -99673,6 +99673,112 @@
         }
       }
     },
+    "Skills · %@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "المهارات · %@"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Skills · %@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Habilidades · %@"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Compétences · %@"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "מיומנויות · %@"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Competenze · %@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "スキル · %@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "스킬 · %@"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vaardigheden · %@"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Umiejętności · %@"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Habilidades · %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Навыки · %@"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Beceriler · %@"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "مہارتیں · %@"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "技能 · %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "技能 · %@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "技能 · %@"
+          }
+        }
+      }
+    },
     "Skip" : { "localizations" : { "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Überspringen" } }, "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Omitir" } }, "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Ignorer" } }, "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Salta" } }, "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Pomiń" } }, "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Pular" } }, "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Overslaan" } }, "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Atla" } }, "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Пропустить" } }, "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "スキップ" } }, "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "跳过" } }, "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "건너뛰기" } }, "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "تخطي" } }, "he" : { "stringUnit" : { "state" : "needs_review", "value" : "דילוג" } }, "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "چھوڑیں" } }, "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "略過" } }, "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "略過" } } } },
     "Skip %@" : { "localizations" : { "de" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ überspringen" } }, "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Omitir %@" } }, "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Ignorer %@" } }, "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Salta %@" } }, "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Pomiń %@" } }, "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Pular %@" } }, "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Sla %@ over" } }, "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ öğesini atla" } }, "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Пропустить %@" } }, "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "%@をスキップ" } }, "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "跳过 %@" } }, "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ 건너뛰기" } }, "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "تخطي %@" } }, "he" : { "stringUnit" : { "state" : "needs_review", "value" : "דילוג על %@" } }, "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ چھوڑیں" } }, "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "略過 %@" } }, "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "略過 %@" } } } },
     "Skip all this session" : {
