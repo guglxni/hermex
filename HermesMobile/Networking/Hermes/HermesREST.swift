@@ -28,7 +28,9 @@ import Foundation
 /// `limit` is clamped to 1-100, there is no offset, and a job without runs answers `{runs: []}`.
 /// The Kanban plugin's reads (#1043), its event socket (#1045) and its writes (#1044) are under
 /// `/api/plugins/kanban` at the same pin, checked against `scripts/local-hermes`;
-/// `docs/agents/kanban.md` § Hermes has their shapes.
+/// `docs/agents/kanban.md` § Hermes has their shapes. The skills routes (#1069) are read at the
+/// same pin and checked against `scripts/local-hermes`: the list is a bare array with `enabled`,
+/// the toggle is PUT, not webui's POST, and a refusal or a missing skill is `{detail}`.
 enum HermesREST: Equatable, Sendable {
     /// Public, so it reads the host before any credential is sent.
     case status
@@ -78,8 +80,14 @@ enum HermesREST: Equatable, Sendable {
     case cronRuns(id: String, profile: String?, limit: Int)
     /// `{targets: [{id, name, …}]}`, `local` first, for one Profile's gateway platforms.
     case cronDeliveryTargets(profile: String?)
-    /// One Profile's skills: a bare array of `{name, description, category, enabled, …}`.
+    /// One Profile's skills, disabled ones included: a bare array of `{name, description,
+    /// category, enabled, …}`.
     case skills(profile: String?)
+    /// Turns one skill on or off for `profile`, which goes in the body, where the host reads
+    /// it before the query; `{ok, name, enabled}`.
+    case setSkill(name: String, enabled: Bool, profile: String?)
+    /// A skill's SKILL.md: `{name, content, path}`, where `path` is a host path, or 404 `{detail}`.
+    case skillContent(name: String, profile: String?)
     /// `{default_tenant, …}`, or 404 when the Kanban plugin is disabled or absent.
     case kanbanConfig
     /// Every Board with its counts, and `current`.
@@ -183,6 +191,16 @@ enum HermesREST: Equatable, Sendable {
         case .cronDeliveryTargets(let profile):
             return Self.get(try Self.url(base, "api/cron/delivery-targets", profile: profile))
         case .skills(let profile): return Self.get(try Self.url(base, "api/skills", profile: profile))
+        case .setSkill(let name, let enabled, let profile):
+            var body: [String: BotJSON] = ["name": .string(name), "enabled": .bool(enabled)]
+            if let profile, !profile.isEmpty { body["profile"] = .string(profile) }
+            return try Self.send("PUT", base.appendingPathComponent("api/skills/toggle"), body)
+        case .skillContent(let name, let profile):
+            guard var parts = URLComponents(url: try Self.url(base, "api/skills/content", profile: profile),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "name", value: name)] + (parts.queryItems ?? [])
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
         case .kanbanConfig: return try Self.kanban(base, ["config"])
         case .kanbanBoards: return try Self.kanban(base, ["boards"])
         case .kanbanBoard(let board, let tenant, let includeArchived):
