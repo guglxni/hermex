@@ -1110,7 +1110,7 @@ detail's latest output is that run's reply, read only when it failed. A page wit
 
 The Skills screens run on a Hermes host through `HermesSkillsClient` (#1069), the
 `SkillsDataClient` beside webui's `APIClient`, bound to the inbox's selected Profile, which
-the screen's subtitle names. It reads `GET /api/skills?profile=`, a bare array with disabled
+the screen names (its subtitle on iOS 26, in the title before). It reads `GET /api/skills?profile=`, a bare array with disabled
 skills included, whose `enabled` becomes the app's `disabled` (the Tasks editor's skill list
 shares that decode), and `GET /api/skills/content?name=&profile=`. A toggle is
 `PUT /api/skills/toggle` with `{name, enabled, profile}` in the body, where the host reads the
