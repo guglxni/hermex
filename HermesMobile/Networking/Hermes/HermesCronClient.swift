@@ -167,7 +167,8 @@ import Foundation
     /// parse or a Task that is gone, reads as that reason. Hermes never answers 403, 502-504
     /// or 520-530 itself, so those get the Hermes connection's copy for the proxy or tunnel
     /// in front of it. Any other status is `APIError.http`, whose 500 is the host's unhandled error.
-    private static func accepted(_ reply: (body: Data, status: Int)) throws -> Data {
+    /// `HermesInsightsClient` reads its replies through it too.
+    static func accepted(_ reply: (body: Data, status: Int)) throws -> Data {
         switch reply.status {
         case 200..<300: return reply.body
         case 403, 502...504, 520...530: throw BotFailure.rejected(reply.status)
