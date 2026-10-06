@@ -156,6 +156,10 @@ enum BotConnectionAdvice {
     /// A stored session's latest rows under `profile` (`HermesREST.sessionMessages`), or nil
     /// when the host has no such session (404).
     func sessionMessages(_ key: String, profile: String) async throws -> [BotJSON]?
+    /// One page of `profile`'s sessions for the Sessions list (`HermesREST.sessionList`, #1046).
+    func sessionPage(profile: String, offset: Int) async throws -> HermesSessionPage
+    /// Sets a session's read mark on the host (`HermesREST.updateSession`, #1046).
+    func setSessionUnread(_ unread: Bool, key: String, profile: String) async throws
     /// Ends this screen's calls, uploads and downloads; the shared socket stays for others.
     func close()
 }
@@ -182,6 +186,14 @@ extension BotTransport {
     }
 
     func sessionMessages(_ key: String, profile: String) async throws -> [BotJSON]? {
+        throw BotFailure.unsupported
+    }
+
+    func sessionPage(profile: String, offset: Int) async throws -> HermesSessionPage {
+        throw BotFailure.unsupported
+    }
+
+    func setSessionUnread(_ unread: Bool, key: String, profile: String) async throws {
         throw BotFailure.unsupported
     }
 

@@ -433,7 +433,7 @@ private extension HermesCall {
     var isCancellationSafe: Bool {
         switch self {
         case .fileAttach, .completePath, .completeSlash, .subagentList, .subagentTail, .sessionActiveList,
-             .profileModelOptions: return true
+             .sessionMostRecent, .profileModelOptions: return true
         default: return false
         }
     }
@@ -443,7 +443,8 @@ private extension HermesCall {
     /// screen's connection; the socket stays for the others.
     var timesOutLocally: Bool {
         switch self {
-        case .subagentList, .subagentTail, .sessionActiveList, .completeSlash, .slashExec, .profileModelOptions: return true
+        case .subagentList, .subagentTail, .sessionActiveList, .sessionMostRecent, .completeSlash, .slashExec,
+             .profileModelOptions: return true
         default: return false
         }
     }
