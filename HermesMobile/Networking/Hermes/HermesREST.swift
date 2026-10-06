@@ -29,6 +29,8 @@ import Foundation
 /// The Kanban plugin's reads (#1043), its event socket (#1045) and its writes (#1044) are under
 /// `/api/plugins/kanban` at the same pin, checked against `scripts/local-hermes`;
 /// `docs/agents/kanban.md` § Hermes has their shapes.
+/// The update routes (#1075) are read at the same pin and checked against `scripts/local-hermes`;
+/// `docs/agents/bots.md` § Updating Hermes has their shapes.
 enum HermesREST: Equatable, Sendable {
     /// Public, so it reads the host before any credential is sent.
     case status
@@ -113,10 +115,39 @@ enum HermesREST: Equatable, Sendable {
     case kanbanArchiveBoard(slug: String)
     /// Makes the Board the host's active one, for every client; `{current}`.
     case kanbanSwitchBoard(slug: String)
+    /// Whether the host's install is behind. The host caches the answer for 24 hours; `force`
+    /// asks it to look again.
+    case updateCheck(force: Bool)
+    /// Starts `hermes update` on the host, without a body. It answers once the update has
+    /// started, before it restarts the dashboard.
+    case updateApply
+    /// The update action: whether it runs, its exit code, the tail of its log and the
+    /// summary of the host's latest update receipt.
+    case updateStatus
+    /// The host's latest update receipt, or 404 when no update has run.
+    case updateReceipt
+    /// Public process liveness with the running release, read while the dashboard restarts.
+    case health
 
     func request(base: URL) throws -> URLRequest {
         switch self {
         case .status: return Self.get(base.appendingPathComponent("api/status"))
+        case .health: return Self.get(base.appendingPathComponent("api/health"))
+        case .updateCheck(let force):
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/hermes/update/check"),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            if force { parts.queryItems = [URLQueryItem(name: "force", value: "true")] }
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .updateApply: return Self.bare("POST", base.appendingPathComponent("api/hermes/update"))
+        case .updateStatus:
+            // The log tail is only read for the summary of a run that stopped, so 40 lines will do.
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/actions/hermes-update/status"),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "lines", value: "40")]
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .updateReceipt: return Self.get(base.appendingPathComponent("api/hermes/update/receipt"))
         case .login(let username, let password):
             return try Self.send("POST", base.appendingPathComponent("auth/password-login"), [
                 "provider": .string("basic"), "username": .string(username), "password": .string(password)
