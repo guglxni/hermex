@@ -452,14 +452,21 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         guard WatchMutationOperation.currentlyEnabledKinds.contains(.stop) else {
             return rejected(context, kind: .stop)
         }
-        guard let urlString = try? resolvedURL(for: run.session.scope), matchesRevision(context) else {
+        guard matchesRevision(context) else {
             return rejected(context, kind: .stop)
         }
-        guard consumeIssuedRun(run) else {
+        // Leave the saved copy in place until cancel succeeds. A phone restart
+        // in the middle of Stop can then still cancel this run.
+        guard takeIssuedRun(run) else {
+            return rejected(context, kind: .stop)
+        }
+        guard let urlString = urlForIssuedRun(run) else {
+            recordIssuedRun(run)
             return rejected(context, kind: .stop)
         }
         do {
             try await backend.cancelChat(urlString: urlString, streamID: run.streamID)
+            persistIssuedRuns()
             let receipt = try MutationReceipt(
                 context: context,
                 operationKind: .stop,
@@ -847,10 +854,11 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         if let cached, let payload = try? WatchMediaPayload(descriptor: descriptor, bytes: cached.bytes) {
             return payload
         }
-        // A digest or size miss must refetch. The stored path stays, because a
-        // long workspace path is cached under a hash handle, not the path itself.
+        // A digest or size miss must refetch. The cached entry stays until that
+        // fetch succeeds: a long workspace path lives only there, and the
+        // handle is its hash. Dropping the entry first made a failed retry
+        // ask the server for the hash.
         let path = cached?.path ?? descriptor.handle.rawValue
-        storage.withLock { $0.mediaByHandle[key] = nil }
         let raw = try await backend.mediaData(
             urlString: urlString,
             sessionID: descriptor.session.sessionID,
@@ -957,23 +965,34 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
     }
 
     private func recordIssuedRun(_ run: RunKey) {
-        storage.withLock { $0.issuedRuns[run.streamID] = run }
-        persistIssuedRuns()
+        storage.withLock { state in
+            state.issuedRuns[run.streamID] = run
+            issuedRunStore?.save(Array(state.issuedRuns.values))
+        }
     }
 
-    private func consumeIssuedRun(_ run: RunKey) -> Bool {
-        let removed = storage.withLock { state -> Bool in
+    /// Drops the run from memory only. The file still has it until cancel
+    /// succeeds and `persistIssuedRuns` writes the smaller set.
+    private func takeIssuedRun(_ run: RunKey) -> Bool {
+        storage.withLock { state in
             guard state.issuedRuns[run.streamID] == run else { return false }
             state.issuedRuns[run.streamID] = nil
             return true
         }
-        if removed { persistIssuedRuns() }
-        return removed
     }
 
     private func persistIssuedRuns() {
-        let runs = storage.withLock { Array($0.issuedRuns.values) }
-        issuedRunStore?.save(runs)
+        storage.withLock { state in
+            issuedRunStore?.save(Array(state.issuedRuns.values))
+        }
+    }
+
+    /// The URL for a run this phone started. After a relaunch the same server
+    /// can have a new generation; the saved run still belongs on that URL.
+    private func urlForIssuedRun(_ run: RunKey) -> String? {
+        storage.withLock { state in
+            state.urlByServer[run.session.scope.server]
+        }
     }
 
     /// Fits a label into the watch DTO byte budget. Returns nil for blank input.

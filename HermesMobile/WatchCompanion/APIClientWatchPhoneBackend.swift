@@ -758,16 +758,20 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
                 Task { @MainActor in UIApplication.shared.endBackgroundTask(ending) }
             }
         }
+        var finished = false
         for attempt in 0..<12 {
             if attempt > 0 {
                 try? await Task.sleep(for: .seconds(2))
             }
             if Task.isCancelled { return }
-            if let phase = try? await runPhase(urlString: urlString, sessionID: sessionID, streamID: streamID),
-               phase.isTerminal {
+            if await streamIsConfirmedFinished(urlString: urlString, streamID: streamID) {
+                finished = true
                 break
             }
         }
+        // A run that is still going, or whose status never confirmed, must not
+        // notify. The latest transcript can still be the previous answer.
+        guard finished else { return }
         guard let page = try? await transcript(urlString: urlString, sessionID: sessionID, before: nil, limit: 8),
               let body = WatchReplyNotice.assistantText(in: page.blocks)
         else { return }
@@ -844,6 +848,17 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
             throw WatchCompanionError.backend(.invalidResponse)
         }
         return text
+    }
+
+    /// `true` only when this stream's own status says it has finished.
+    /// A missing status, or a session that is merely not streaming yet, is not
+    /// enough: that race used to notify the watch with the previous answer.
+    private func streamIsConfirmedFinished(urlString: String, streamID: String) async -> Bool {
+        guard let status = try? await client(for: urlString).chatStreamStatus(streamID: streamID) else {
+            return false
+        }
+        if status.journal?.terminal == true { return true }
+        return status.active == false
     }
 
     func runPhase(

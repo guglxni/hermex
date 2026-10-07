@@ -109,6 +109,15 @@ public final class WatchRootModel {
 
     public func armComplicationRecording() {
         complicationRecordID = UUID()
+        discardUnusableComplicationRecording()
+    }
+
+    /// A tap that already knows Now has no session must not start the
+    /// microphone when a session appears later. A tap during the first load
+    /// waits until that load says whether a session exists.
+    public func discardUnusableComplicationRecording() {
+        guard hasLoadedSessions, nowSession == nil else { return }
+        complicationRecordID = nil
     }
 
     /// `true` the first time a complication tap is claimed, so the microphone
@@ -233,7 +242,10 @@ public final class WatchRootModel {
 
     public func loadSessions() async {
         guard let link, let scope = selectedScope else { return }
-        defer { hasLoadedSessions = true }
+        defer {
+            hasLoadedSessions = true
+            discardUnusableComplicationRecording()
+        }
         do {
             let snapshot = try await link.makeService().refreshSessions(
                 scope: scope,

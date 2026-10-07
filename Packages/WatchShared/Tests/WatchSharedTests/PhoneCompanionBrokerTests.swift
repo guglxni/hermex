@@ -1,6 +1,9 @@
+import CoreGraphics
 import CryptoKit
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import WatchShared
 
 @Suite struct PhoneCompanionBrokerTests {
@@ -43,6 +46,9 @@ import Testing
         var skillToggles: [(name: String, enabled: Bool)] = []
         var kanbanMoves: [(cardID: String, status: String, boardSlug: String)] = []
         var mediaBySessionAndPath: [String: Data] = [:]
+        var mediaPaths: [String] = []
+        var failMedia = false
+        var failCancel = false
         var failWrites = false
 
         init(
@@ -95,6 +101,8 @@ import Testing
             )
         }
         func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
+            mediaPaths.append(path)
+            if failMedia { throw WatchCompanionError.backend(.timeout) }
             if let data = mediaBySessionAndPath["\(sessionID)|\(path)"] {
                 return data
             }
@@ -103,7 +111,10 @@ import Testing
             }
             return data
         }
-        func cancelChat(urlString: String, streamID: String) async throws { cancelledStreamIDs.append(streamID) }
+        func cancelChat(urlString: String, streamID: String) async throws {
+            if failCancel { throw WatchCompanionError.backend(.timeout) }
+            cancelledStreamIDs.append(streamID)
+        }
         func transcript(urlString: String, sessionID: String, before: Int?, limit: Int) async throws -> WatchPhoneTranscriptPage { transcriptPage }
         func runPhase(urlString: String, sessionID: String, streamID: String) async throws -> (phase: WatchRunPhase, isTerminal: Bool) { phase }
         func transcribeAudio(urlString: String, data: Data, filename: String) async throws -> String {
@@ -515,6 +526,61 @@ import Testing
         #expect(receipt.receipt.phase == .acknowledged)
         #expect(backend.cancelledStreamIDs == ["stream-1"])
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test func aFailedStopLeavesTheRunStoppableAfterThePhoneRestarts() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = WatchIssuedRunFileStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let epoch = InstallationEpoch(rawValue: UUID())
+        let first = PhoneCompanionBroker(epoch: epoch, backend: backend, now: { Date(timeIntervalSince1970: 1_700_000_000) }, issuedRunStore: store)
+        let registry = await first.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "s1")
+        let context = try context(scope: scope, revision: registry.revision)
+        let started = await first.send(text: "continue", to: session, context: context)
+        let run = try #require(started.value)
+
+        backend.failCancel = true
+        let failed = await first.stop(run: run, context: context)
+        #expect(failed.receipt.phase == .rejected)
+        #expect(backend.cancelledStreamIDs.isEmpty)
+
+        backend.failCancel = false
+        let restarted = PhoneCompanionBroker(epoch: epoch, backend: backend, now: { Date(timeIntervalSince1970: 1_700_000_000) }, issuedRunStore: store)
+        let refreshed = await restarted.registry()
+        let receipt = await restarted.stop(run: run, context: try self.context(scope: scope, revision: refreshed.revision))
+        #expect(receipt.receipt.phase == .acknowledged)
+        #expect(backend.cancelledStreamIDs == ["stream-1"])
+    }
+
+    @Test func stopStillReachesTheServerAfterItsGenerationChanges() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "s1")
+        let context = try context(scope: scope, revision: registry.revision)
+        let started = await broker.send(text: "continue", to: session, context: context)
+        let run = try #require(started.value)
+
+        backend.accounts = []
+        _ = await broker.registry()
+        backend.accounts = [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")]
+        let refreshed = await broker.registry()
+        let moved = try #require(refreshed.entries.first?.scope)
+        #expect(moved.generation != scope.generation)
+
+        let receipt = await broker.stop(run: run, context: try self.context(scope: moved, revision: refreshed.revision))
+        #expect(receipt.receipt.phase == .acknowledged)
+        #expect(backend.cancelledStreamIDs == ["stream-1"])
     }
 
     @Test func transcribeVoiceNoteUsesTheScopedServer() async throws {
@@ -976,6 +1042,47 @@ import Testing
         #expect(replaced.bytes == second)
     }
 
+    @Test func aFailedImageRetryKeepsTheRealPathBehindAHashHandle() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let longPath = "/" + String(repeating: "workspace/", count: 40) + "shot.jpg"
+        #expect(longPath.utf8.count > 256)
+        backend.mediaByPath[longPath] = tinyJPEG()
+        backend.transcriptPage = WatchPhoneTranscriptPage(
+            blocks: [WatchPhoneTranscriptPage.Block(id: "img", kind: .image(path: longPath, mime: "image/jpeg", alt: nil))],
+            nextBefore: nil,
+            isTruncated: false
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "sess-a")
+        let transcript = try await broker.transcript(key: session, before: nil, limit: 8)
+        let descriptor: WatchMediaDescriptor
+        if case .image(_, let image, _) = transcript.value.blocks.first {
+            descriptor = image
+        } else {
+            Issue.record("The long path should arrive as an image, not a hash the server cannot open")
+            return
+        }
+        #expect(descriptor.handle.rawValue != longPath)
+
+        backend.failMedia = true
+        backend.mediaPaths = []
+        let replacement = Data([9, 8, 7, 6])
+        let asking = try imageDescriptor(
+            scope: scope,
+            sessionID: "sess-a",
+            bytes: replacement,
+            handle: descriptor.handle.rawValue
+        )
+        await #expect(throws: (any Error).self) { try await broker.media(asking) }
+        await #expect(throws: (any Error).self) { try await broker.media(asking) }
+        #expect(backend.mediaPaths == [longPath, longPath])
+    }
+
     @Test func issuedRunsStayStoppableForSixHoursAndThenExpire() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("hermex-issued-runs-\(UUID().uuidString)", isDirectory: true)
@@ -1005,14 +1112,19 @@ import Testing
         #expect(abs(savedAt.timeIntervalSinceNow) > 4 * 60 * 60)
     }
 
-    private func imageDescriptor(scope: ServerScope, sessionID: String, bytes: Data) throws -> WatchMediaDescriptor {
+    private func imageDescriptor(
+        scope: ServerScope,
+        sessionID: String,
+        bytes: Data,
+        handle: String = "shot.jpg"
+    ) throws -> WatchMediaDescriptor {
         let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         let observed = Date(timeIntervalSince1970: 1_700_000_000)
         return try WatchMediaDescriptor(
             scope: scope,
             session: SessionKey(scope: scope, sessionID: sessionID),
             origin: OriginBinding(digest: digest),
-            handle: MediaHandle("shot.jpg"),
+            handle: MediaHandle(handle),
             mimeType: "image/jpeg",
             byteSize: bytes.count,
             sha256: digest,
@@ -1031,6 +1143,29 @@ import Testing
             expiresAt: created.addingTimeInterval(60)
         )
     }
+}
+
+private func tinyJPEG() -> Data {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let context = CGContext(
+        data: nil,
+        width: 1,
+        height: 1,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )
+    context?.setFillColor(red: 1, green: 0, blue: 0, alpha: 1)
+    context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+    guard let image = context?.makeImage() else { return Data() }
+    let data = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+        return Data()
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    CGImageDestinationFinalize(destination)
+    return data as Data
 }
 
 /// Mirrors the phone's issued-run file so a test can age a stamp without

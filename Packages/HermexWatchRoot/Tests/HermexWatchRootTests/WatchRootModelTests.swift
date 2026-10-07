@@ -691,6 +691,44 @@ final class WatchRootModelTests: XCTestCase {
         XCTAssertNil(model.errorCopy)
     }
 
+    func testComplicationTapOnALoadedEmptyNowDoesNotWaitForALaterSession() {
+        let model = WatchRootModel()
+        model.applyReadyStateForTesting(servers: [], sessions: [])
+
+        model.armComplicationRecording()
+
+        XCTAssertNil(model.complicationRecordID)
+    }
+
+    func testComplicationTapDuringTheFirstLoadWaitsForThatLoad() throws {
+        let model = WatchRootModel()
+        model.armComplicationRecording()
+        XCTAssertNotNil(model.complicationRecordID)
+
+        model.applyReadyStateForTesting(servers: [], sessions: [])
+        model.discardUnusableComplicationRecording()
+        XCTAssertNil(model.complicationRecordID)
+
+        let scope = Self.makeScope()
+        let session = try WatchSessionSummary(
+            key: SessionKey(scope: scope, sessionID: "notes"),
+            title: "Notes",
+            profile: nil,
+            workspaceLabel: nil,
+            updatedAt: Date(timeIntervalSince1970: 20),
+            isPinned: false,
+            isArchived: false,
+            attention: false,
+            runState: nil
+        )
+        model.applyReadyStateForTesting(
+            servers: [RegistryEntry(scope: scope, displayName: try RedactedDisplayName("Studio"))],
+            sessions: [session]
+        )
+        model.armComplicationRecording()
+        XCTAssertNotNil(model.complicationRecordID)
+    }
+
     // MARK: - Helpers
 
     private static func makeScope() -> ServerScope {

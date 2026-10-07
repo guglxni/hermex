@@ -62,11 +62,11 @@ struct WatchNowView: View {
                     .accessibilityLabel("Hermex")
             }
         }
-        .onChange(of: model.hasLoadedSessions) { _, loaded in
-            // A complication tap with nowhere to send must not start the
-            // microphone the next time a session appears on its own.
-            guard loaded, model.nowSession == nil else { return }
-            _ = model.consumeComplicationRecording()
+        .onChange(of: model.complicationRecordID) { _, _ in
+            model.discardUnusableComplicationRecording()
+        }
+        .onChange(of: model.hasLoadedSessions) { _, _ in
+            model.discardUnusableComplicationRecording()
         }
         .refreshable {
             await model.refreshFromList()
