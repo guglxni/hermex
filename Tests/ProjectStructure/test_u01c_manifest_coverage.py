@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = ROOT.parents[1] / "watchos-aidlc-governance/inception/u01c-shared-boundary-manifest.json"
+MANIFEST = Path(__file__).with_name("u01c-shared-boundary-manifest.json")
 WITNESS_CONTRACT = Path(__file__).with_name("u01c-semantic-witnesses.json")
 DECLARATION_TEMPLATE = r"\b(?:struct|enum|protocol|actor|class|typealias)\s+{name}\b"
 SWIFT_SCAN_EXCLUDED_PARTS = {".build", "DerivedData", ".git", "Tests"}

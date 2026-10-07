@@ -23,6 +23,9 @@ struct WatchSpeakControls: View {
     @State private var isSendingPhoto = false
     @State private var isSendingText = false
     @State private var isStopping = false
+    /// Cleared when the screen goes away, so a late microphone grant cannot
+    /// start recording after Cancel is no longer on screen.
+    @State private var voiceAttempt: UUID?
 
     var body: some View {
         Group {
@@ -43,8 +46,11 @@ struct WatchSpeakControls: View {
         }
         .onChange(of: isLuminanceReduced) { _, reduced in
             // A dimmed screen hides Cancel, so the microphone must not stay
-            // open behind it.
-            if reduced, capture.phase == .recording { cancelVoice() }
+            // open behind it, and a permission prompt must not start it later.
+            if reduced {
+                voiceAttempt = nil
+                if capture.phase == .recording { cancelVoice() }
+            }
         }
         .onChange(of: model.complicationRecordID) { _, id in
             guard id != nil else { return }
@@ -55,7 +61,9 @@ struct WatchSpeakControls: View {
             Task { await startFromComplication() }
         }
         .onDisappear {
-            // Leaving the screen must not leave the microphone open.
+            // Leaving the screen must not leave the microphone open, including
+            // a start that is still waiting on the permission prompt.
+            voiceAttempt = nil
             if capture.phase == .recording {
                 recorder.cancel()
                 capture.cancel()
@@ -337,12 +345,22 @@ struct WatchSpeakControls: View {
 
     private func startVoice() async {
         guard capture.phase == .idle || isFailed else { return }
+        let attempt = UUID()
+        voiceAttempt = attempt
         speaker.stop()
         beginAttempt()
         do {
-            try await recorder.begin()
+            try await recorder.begin {
+                WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: voiceAttempt)
+            }
+            guard WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: voiceAttempt) else {
+                recorder.cancel()
+                return
+            }
             capture.beginRecording()
             WatchHaptics.play(.start)
+        } catch WatchSpeechError.abandoned {
+            recorder.cancel()
         } catch {
             capture.fail(code: "micDenied")
             WatchHaptics.play(.failure)

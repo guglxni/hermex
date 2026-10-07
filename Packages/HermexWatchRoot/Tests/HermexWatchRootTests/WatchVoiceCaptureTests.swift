@@ -47,4 +47,11 @@ final class WatchVoiceCaptureTests: XCTestCase {
         XCTAssertFalse(WatchVoiceCapturePolicy.accept(duration: 0.1))
         XCTAssertFalse(WatchVoiceCapturePolicy.accept(duration: 301))
     }
+
+    func testRecordingWaitsUntilTheAttemptIsStillCurrent() {
+        let attempt = UUID()
+        XCTAssertTrue(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: attempt))
+        XCTAssertFalse(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: nil))
+        XCTAssertFalse(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: UUID()))
+    }
 }

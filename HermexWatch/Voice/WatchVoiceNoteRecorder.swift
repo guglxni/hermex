@@ -7,6 +7,7 @@ enum WatchSpeechError: Error {
     case denied
     case unavailable
     case empty
+    case abandoned
 }
 
 @MainActor
@@ -37,15 +38,21 @@ final class WatchVoiceNoteRecorder {
         elapsed >= WatchVoiceCapturePolicy.maximumDuration
     }
 
-    func begin() async throws {
+    func begin(isStillCurrent: @MainActor () -> Bool = { true }) async throws {
         let granted = await requestMicrophone()
         guard granted else { throw WatchSpeechError.denied }
+        guard isStillCurrent() else { throw WatchSpeechError.abandoned }
         try activateSession()
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice-note-\(UUID().uuidString.prefix(8)).m4a")
         let recorder = try AVAudioRecorder(url: url, settings: Self.recordingSettings)
         elapsed = 0
+        guard isStillCurrent() else {
+            teardownSession()
+            throw WatchSpeechError.abandoned
+        }
         guard recorder.record(forDuration: WatchVoiceCapturePolicy.maximumDuration) else {
+            teardownSession()
             throw WatchSpeechError.unavailable
         }
         self.recorder = recorder

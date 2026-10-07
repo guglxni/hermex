@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import WatchShared
@@ -53,6 +54,9 @@ public final class WatchRootModel {
     /// The board the watch is showing. A card move sends this slug instead of
     /// asking the phone to pick a board again.
     private(set) var kanbanBoardSlug = ""
+    /// Scope the board on screen was loaded for. A phone server switch must
+    /// not move a card that was read from the previous server.
+    private var kanbanLoadedScope: ServerScope?
     /// Set while the phone cannot answer right now. The last ready screen stays
     /// up; this is the reason, not a reason to wipe it.
     public private(set) var phoneStatusNote: String?
@@ -417,17 +421,22 @@ public final class WatchRootModel {
         }
     }
 
-    public func controlTask(jobID: String, action: TaskControl) async -> Bool {
+    public func controlTask(jobID: String, action: TaskControl, scope: ServerScope? = nil) async -> Bool {
         if applyFixtureTaskControl(jobID: jobID, action: action) { return true }
-        guard canMutate, let link, let scope = selectedScope else { return false }
+        guard canMutate, let link, let selectedScope else { return false }
+        let actionScope = scope ?? selectedScope
+        guard actionScope == selectedScope else {
+            lastErrorCode = "taskControlFailed"
+            return false
+        }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         let created = Date()
         do {
-            let key = try TaskKey(scope: scope, jobID: jobID)
+            let key = try TaskKey(scope: actionScope, jobID: jobID)
             let context = try CommandContext(
                 stableCommandID: CommandID(rawValue: UUID()),
-                scope: scope,
+                scope: actionScope,
                 expectedRevision: revision,
                 createdAt: created,
                 expiresAt: created.addingTimeInterval(60)
@@ -445,14 +454,19 @@ public final class WatchRootModel {
         }
     }
 
-    public func setSkillEnabled(name: String, enabled: Bool) async -> Bool {
+    public func setSkillEnabled(name: String, enabled: Bool, scope: ServerScope? = nil) async -> Bool {
         if applyFixtureSkillToggle(name: name, enabled: enabled) { return true }
-        guard canMutate, let link, let scope = selectedScope else { return false }
+        guard canMutate, let link, let selectedScope else { return false }
+        let actionScope = scope ?? selectedScope
+        guard actionScope == selectedScope else {
+            lastErrorCode = "skillToggleFailed"
+            return false
+        }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         do {
             try await service.setSkillEnabled(
-                scope: scope,
+                scope: actionScope,
                 name: name,
                 enabled: enabled,
                 expectedRevision: revision
@@ -467,7 +481,11 @@ public final class WatchRootModel {
 
     public func moveKanbanCard(cardID: String, status: String) async -> Bool {
         if applyFixtureKanbanMove(cardID: cardID, status: status) { return true }
-        guard canMutate, let link, let scope = selectedScope else { return false }
+        guard canMutate, let link else { return false }
+        guard let scope = readyKanbanScope() else {
+            lastErrorCode = "kanbanMoveFailed"
+            return false
+        }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         do {
@@ -493,7 +511,11 @@ public final class WatchRootModel {
 
     public func createKanbanCard(boardSlug: String, title: String, status: String) async -> Bool {
         if applyFixtureKanbanCreate(boardSlug: boardSlug, title: title, status: status) { return true }
-        guard canMutate, let link, let scope = selectedScope else { return false }
+        guard canMutate, let link else { return false }
+        guard let scope = readyKanbanScope() else {
+            lastErrorCode = "kanbanCreateFailed"
+            return false
+        }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         do {
@@ -518,7 +540,11 @@ public final class WatchRootModel {
             lastErrorCode = nil
             return dryRun ? "Preview ready." : "Spawned 0\nPromoted 0"
         }
-        guard canMutate, let link, let scope = selectedScope else { return nil }
+        guard canMutate, let link else { return nil }
+        guard let scope = readyKanbanScope() else {
+            lastErrorCode = "kanbanDispatchFailed"
+            return nil
+        }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         do {
@@ -568,6 +594,7 @@ public final class WatchRootModel {
     /// The board the iPhone is browsing, including a board whose columns are all
     /// empty. `nil` means the read failed; an empty card list is a real board.
     public func loadKanbanBoard(slug: String?, includeArchived: Bool, onlyMine: Bool) async -> WatchKanbanBoardLoad? {
+        let loadedScope = selectedScope
         let summaries: [WatchSkillSummary]
         if let fixtureGlances {
             summaries = fixtureGlances.kanban
@@ -580,11 +607,20 @@ public final class WatchRootModel {
         }
         let board = Self.kanbanBoard(from: summaries, includeArchived: includeArchived)
         kanbanBoardSlug = board.chrome.slug
+        kanbanLoadedScope = loadedScope
         return board
     }
 
     func useKanbanBoardForTesting(_ slug: String) {
         kanbanBoardSlug = slug
+        kanbanLoadedScope = selectedScope
+    }
+
+    /// The board on screen and the phone's current server. A mismatch means
+    /// the rows were loaded before a server switch.
+    private func readyKanbanScope() -> ServerScope? {
+        guard let selectedScope, kanbanLoadedScope == selectedScope else { return nil }
+        return selectedScope
     }
 
     private static func kanbanBoard(from summaries: [WatchSkillSummary], includeArchived: Bool) -> WatchKanbanBoardLoad {
@@ -763,11 +799,17 @@ public final class WatchRootModel {
     }
 
     public func mediaBytes(for descriptor: WatchMediaDescriptor) async -> Data? {
-        let cacheKey = descriptor.handle.rawValue
-        if let cached = mediaCache[cacheKey] { return cached }
+        let cacheKey = WatchMediaCacheIdentity.key(for: descriptor)
+        if let cached = mediaCache[cacheKey] {
+            if WatchMediaCacheIdentity.accepts(cached, descriptor: descriptor) {
+                return cached
+            }
+            mediaCache[cacheKey] = nil
+        }
         guard let link else { return nil }
         do {
             let payload = try await link.makeService().media(descriptor)
+            guard WatchMediaCacheIdentity.accepts(payload.bytes, descriptor: descriptor) else { return nil }
             mediaCache[cacheKey] = payload.bytes
             return payload.bytes
         } catch {
@@ -1316,17 +1358,19 @@ public final class WatchRootModel {
 
     private func loadRegistry(using service: any WatchCompanionServicing) async {
         let snapshot = await service.registry()
-        servers = snapshot.entries
-        registryRevision = snapshot.revision
         if snapshot.entries.isEmpty {
             // A failed wake returns the same empty snapshot as a phone with
-            // no servers. Keep a board we already showed.
+            // no servers. Check the board we already showed before replacing
+            // it, or Stop and the session list disappear with the failure.
             if servers.isEmpty {
+                registryRevision = snapshot.revision
                 state = .setupRequired
                 adopt(nil)
             }
             return
         }
+        servers = snapshot.entries
+        registryRevision = snapshot.revision
         // The iPhone lists its active server first. A selection that is gone from
         // the registry is always replaced; an unpinned watch also follows the
         // iPhone when it switches servers, so the wrist never operates on a
@@ -1393,5 +1437,24 @@ public final class WatchRootModel {
     func reloadRegistryForTesting() async {
         guard let link else { return }
         await loadRegistry(using: link.makeService())
+    }
+}
+
+/// Cache identity for a watch image. The handle is often just the file path,
+/// so two sessions can share it and still be different pictures.
+enum WatchMediaCacheIdentity {
+    static func key(for descriptor: WatchMediaDescriptor) -> String {
+        [
+            descriptor.scope.server.rawValue.uuidString,
+            descriptor.session.sessionID,
+            descriptor.handle.rawValue,
+            descriptor.sha256.lowercased(),
+        ].joined(separator: "|")
+    }
+
+    static func accepts(_ bytes: Data, descriptor: WatchMediaDescriptor) -> Bool {
+        guard bytes.count == descriptor.byteSize else { return false }
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        return digest == descriptor.sha256.lowercased()
     }
 }

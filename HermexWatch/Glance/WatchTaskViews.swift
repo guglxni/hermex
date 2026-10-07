@@ -113,7 +113,7 @@ struct WatchTaskListView: View {
 
     private func control(_ task: WatchTaskSummary, _ action: TaskControl) async {
         actionError = nil
-        if await model.controlTask(jobID: task.key.jobID, action: action) {
+        if await model.controlTask(jobID: task.key.jobID, action: action, scope: task.key.scope) {
             WatchHaptics.play(.success)
             await reload()
         } else {
@@ -329,7 +329,7 @@ struct WatchTaskDetailView: View {
         busy = action
         actionError = nil
         defer { busy = nil }
-        guard await model.controlTask(jobID: task.key.jobID, action: action) else {
+        guard await model.controlTask(jobID: task.key.jobID, action: action, scope: task.key.scope) else {
             actionError = WatchTaskPresentation.failureCopy(for: action)
             WatchHaptics.play(.failure)
             return

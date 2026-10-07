@@ -2,6 +2,13 @@ import Foundation
 import UIKit
 import WatchShared
 
+enum WatchChatCancelAcceptance {
+    /// A missing `ok` still counts. Only an explicit `false` is a refusal.
+    static func isAccepted(_ response: ChatCancelResponse) -> Bool {
+        response.ok != false
+    }
+}
+
 /// Phone execution port: scoped `APIClient` calls, never a watch-invented endpoint.
 struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// The iPhone's active server is listed first; `WatchRootModel` follows that
@@ -808,7 +815,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func cancelChat(urlString: String, streamID: String) async throws {
-        _ = try await client(for: urlString).cancelChat(streamID: streamID)
+        let response = try await client(for: urlString).cancelChat(streamID: streamID)
+        // `ok: false` is a refused cancel. Treating it as success hid Stop
+        // while the server kept running. A missing `ok` is still acceptance,
+        // matching the phone's `cancelActiveStream`.
+        guard WatchChatCancelAcceptance.isAccepted(response) else {
+            throw WatchCompanionError.backend(.invalidResponse)
+        }
     }
 
     func transcript(

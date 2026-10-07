@@ -30,6 +30,14 @@ public enum WatchVoiceCapturePolicy {
     }
 }
 
+/// A microphone prompt can outlive the screen that asked for it. Recording
+/// starts only for the attempt that is still current.
+public enum WatchVoiceStartGate {
+    public static func shouldBeginRecording(attempt: UUID, currentAttempt: UUID?) -> Bool {
+        currentAttempt == attempt
+    }
+}
+
 @MainActor
 @Observable
 public final class WatchVoiceCapture {

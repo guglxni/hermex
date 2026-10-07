@@ -1,4 +1,5 @@
 import Observation
+import CryptoKit
 import WatchShared
 import XCTest
 @testable import HermexWatchRoot
@@ -918,6 +919,106 @@ extension WatchRootModelTests {
         XCTAssertEqual(WatchRootModel.errorCopy(for: "sendFailed"), "Couldn’t send. Try again.")
         XCTAssertEqual(WatchRootModel.errorCopy(for: "stopFailed"), "Couldn’t stop the run.")
         XCTAssertEqual(WatchRootModel.errorCopy(for: "nonsense"), "Something went wrong. Try again.")
+    }
+
+    /// A glance left open across a phone server switch still shows the old
+    /// rows. Those rows must not run on the server the phone just selected.
+    func testGlanceActionsRejectARowFromThePreviousServer() async throws {
+        let alphaAccount = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let betaAccount = WatchPhoneServerAccount(urlString: "https://beta.example", displayName: "Beta")
+        let backend = RootScriptedBackend(accounts: [alphaAccount, betaAccount])
+        backend.sessionsByURL = [
+            "https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")],
+            "https://beta.example": [Self.row(sessionID: "b", title: "Beta session")],
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        let alpha = try XCTUnwrap(model.selectedScope)
+        model.useKanbanBoardForTesting("default")
+
+        backend.accounts = [betaAccount, alphaAccount]
+        await model.reloadRegistryForTesting()
+        let beta = try XCTUnwrap(model.selectedScope)
+        XCTAssertNotEqual(alpha, beta)
+
+        let ran = await model.controlTask(jobID: "job-1", action: .run, scope: alpha)
+        let toggled = await model.setSkillEnabled(name: "web-search", enabled: false, scope: alpha)
+        let moved = await model.moveKanbanCard(cardID: "card-1", status: "Done")
+        XCTAssertFalse(ran)
+        XCTAssertFalse(toggled)
+        XCTAssertFalse(moved)
+        XCTAssertTrue(backend.controlledTasks.isEmpty)
+        XCTAssertTrue(backend.skillToggles.isEmpty)
+        XCTAssertTrue(backend.kanbanMoves.isEmpty)
+
+        let ranOnBeta = await model.controlTask(jobID: "job-1", action: .run, scope: beta)
+        XCTAssertTrue(ranOnBeta)
+        XCTAssertEqual(backend.controlledTasks.map(\.jobID), ["job-1"])
+    }
+
+    /// A failed phone wake is an empty registry, the same shape as no servers.
+    /// A board that was already loaded, including its Stop control, stays.
+    func testEmptyRegistryRefreshKeepsStopOnALoadedBoard() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        backend.sessionsByURL = ["https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")]]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        let session = try XCTUnwrap(model.sessions.first)
+        let run = await model.send(text: "go", to: session)
+        XCTAssertNotNil(run)
+        XCTAssertNotNil(model.activeRun(for: session))
+
+        backend.accounts = []
+        await model.reloadRegistryForTesting()
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNotEqual(model.primaryMessage, "Set up on iPhone")
+        XCTAssertEqual(model.sessions.map(\.title), ["Alpha session"])
+        XCTAssertEqual(model.activeRun(for: session), run)
+    }
+
+    func testImageCacheKeyIncludesTheSessionAndDigest() throws {
+        let scope = Self.makeScope()
+        let other = ServerScope(
+            epoch: scope.epoch,
+            server: ServerID(rawValue: UUID()),
+            generation: scope.generation
+        )
+        let bytes = Data("clip".utf8)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let first = try Self.media(scope: scope, sessionID: "a", handle: "note.png", bytes: bytes, digest: digest)
+        let otherSession = try Self.media(scope: scope, sessionID: "b", handle: "note.png", bytes: bytes, digest: digest)
+        let otherServer = try Self.media(scope: other, sessionID: "a", handle: "note.png", bytes: bytes, digest: digest)
+        XCTAssertNotEqual(WatchMediaCacheIdentity.key(for: first), WatchMediaCacheIdentity.key(for: otherSession))
+        XCTAssertNotEqual(WatchMediaCacheIdentity.key(for: first), WatchMediaCacheIdentity.key(for: otherServer))
+        XCTAssertTrue(WatchMediaCacheIdentity.accepts(bytes, descriptor: first))
+        XCTAssertFalse(WatchMediaCacheIdentity.accepts(Data("other".utf8), descriptor: first))
+    }
+
+    private static func media(
+        scope: ServerScope,
+        sessionID: String,
+        handle: String,
+        bytes: Data,
+        digest: String
+    ) throws -> WatchMediaDescriptor {
+        let observed = Date(timeIntervalSince1970: 10)
+        return try WatchMediaDescriptor(
+            scope: scope,
+            session: SessionKey(scope: scope, sessionID: sessionID),
+            origin: OriginBinding(digest: "origin"),
+            handle: MediaHandle(handle),
+            mimeType: "image/png",
+            byteSize: bytes.count,
+            sha256: digest,
+            observedAt: observed,
+            expiresAt: observed.addingTimeInterval(60)
+        )
     }
 
     #if DEBUG

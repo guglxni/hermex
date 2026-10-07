@@ -306,3 +306,14 @@ final class WatchVoiceNoteTranscriptionTests: XCTestCase {
         XCTAssertNil(WatchVoiceNoteTranscription.serverTranscriptText(transcript: nil, error: nil))
     }
 }
+
+final class WatchChatCancelAcceptanceTests: XCTestCase {
+    func testExplicitRefusalIsNotASuccessfulStop() {
+        XCTAssertFalse(WatchChatCancelAcceptance.isAccepted(ChatCancelResponse(ok: false, cancelled: false, streamId: "s", error: "busy")))
+    }
+
+    func testACancelWithoutOkStillCounts() {
+        XCTAssertTrue(WatchChatCancelAcceptance.isAccepted(ChatCancelResponse(ok: nil, cancelled: nil, streamId: "s", error: nil)))
+        XCTAssertTrue(WatchChatCancelAcceptance.isAccepted(ChatCancelResponse(ok: true, cancelled: true, streamId: "s", error: nil)))
+    }
+}

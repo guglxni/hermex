@@ -86,7 +86,7 @@ struct WatchSkillListView: View {
         toggling = skill.key.name
         actionError = nil
         defer { toggling = nil }
-        if await model.setSkillEnabled(name: skill.key.name, enabled: skill.enabled == false) {
+        if await model.setSkillEnabled(name: skill.key.name, enabled: skill.enabled == false, scope: skill.key.scope) {
             WatchHaptics.play(.success)
             await reload()
         } else {
@@ -171,7 +171,7 @@ struct WatchSkillDetailView: View {
         isToggling = true
         actionError = nil
         defer { isToggling = false }
-        guard await model.setSkillEnabled(name: skill.key.name, enabled: enabled) else {
+        guard await model.setSkillEnabled(name: skill.key.name, enabled: enabled, scope: skill.key.scope) else {
             actionError = "Couldn’t update that skill."
             WatchHaptics.play(.failure)
             return
