@@ -978,7 +978,32 @@ extension WatchRootModelTests {
 
         XCTAssertEqual(model.state, .setupRequired)
         XCTAssertEqual(model.primaryMessage, "Set up on iPhone")
+        XCTAssertTrue(model.servers.isEmpty)
         XCTAssertNil(model.activeRun(for: session))
+    }
+
+    /// After the last server is gone, the next refresh shows Connecting until
+    /// the phone answers. A failed answer must settle on setup, not stay there.
+    func testFailedWakeAfterRemovingTheLastServerSettlesOnSetup() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        XCTAssertFalse(model.servers.isEmpty)
+
+        backend.accounts = []
+        await model.reloadRegistryForTesting()
+        XCTAssertEqual(model.state, .setupRequired)
+        XCTAssertTrue(model.servers.isEmpty)
+
+        model.beginConnecting()
+        XCTAssertEqual(model.state, .connecting)
+        model.applyRegistrySnapshotForTesting(RegistrySnapshot.unavailableWake())
+
+        XCTAssertEqual(model.state, .setupRequired)
+        XCTAssertEqual(model.primaryMessage, "Set up on iPhone")
     }
 
     func testFailedWakeKeepsStopOnALoadedBoard() async throws {

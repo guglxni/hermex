@@ -1371,6 +1371,10 @@ public final class WatchRootModel {
             if !servers.isEmpty, snapshot.isUnavailableWake {
                 return
             }
+            // Drop the old server list too. A later failed wake treats a
+            // nonempty list as "keep the board", which would leave the watch
+            // on Connecting after the phone said there are no servers.
+            servers = []
             registryRevision = snapshot.revision
             state = .setupRequired
             adopt(nil)
