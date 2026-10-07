@@ -76,6 +76,9 @@ struct WatchRootView: View {
             .onAppear {
                 applyScreenshotPath()
             }
+            .onChange(of: model.complicationRecordID) { _, id in
+                if id != nil { path = NavigationPath() }
+            }
             .onChange(of: model.sessions) { _, _ in
                 WatchWidgetSnapshotPublisher.publish(model)
             }

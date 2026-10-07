@@ -44,6 +44,15 @@ public final class WatchRootModel {
     /// The Now session's latest assistant turn as speakable words, for Read
     /// aloud. Separate from `nowPreview`, which is clipped to a glance line.
     public private(set) var nowSpokenReply: String?
+    /// Set when a complication opens the app. Now consumes it once and starts
+    /// a voice note; Cancel is still on screen before the note is sent.
+    public private(set) var complicationRecordID: UUID?
+    /// False while the watch app is not the frontmost scene, so a finished
+    /// reply can be posted as a notification instead of only updating Now.
+    public private(set) var isWatchForeground = false
+    /// The board the watch is showing. A card move sends this slug instead of
+    /// asking the phone to pick a board again.
+    private(set) var kanbanBoardSlug = ""
     /// Set while the phone cannot answer right now. The last ready screen stays
     /// up; this is the reason, not a reason to wipe it.
     public private(set) var phoneStatusNote: String?
@@ -96,6 +105,22 @@ public final class WatchRootModel {
     public var canStopNow: Bool {
         guard let session = nowSession else { return false }
         return activeRun(for: session) != nil
+    }
+
+    public func armComplicationRecording() {
+        complicationRecordID = UUID()
+    }
+
+    /// `true` the first time a complication tap is claimed, so the microphone
+    /// starts once even if Now appears and the id changes in the same turn.
+    public func consumeComplicationRecording() -> Bool {
+        guard complicationRecordID != nil else { return false }
+        complicationRecordID = nil
+        return true
+    }
+
+    public func setWatchForeground(_ foreground: Bool) {
+        isWatchForeground = foreground
     }
 
     public func attach(link: any WatchCompanionLinking) {
@@ -434,10 +459,16 @@ public final class WatchRootModel {
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
         do {
+            let board = kanbanBoardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !board.isEmpty else {
+                lastErrorCode = "kanbanMoveFailed"
+                return false
+            }
             try await service.moveKanbanCard(
                 scope: scope,
                 cardID: cardID,
                 status: status,
+                boardSlug: board,
                 expectedRevision: revision
             )
             lastErrorCode = nil
@@ -535,7 +566,13 @@ public final class WatchRootModel {
             }) else { return nil }
             summaries = loaded
         }
-        return Self.kanbanBoard(from: summaries, includeArchived: includeArchived)
+        let board = Self.kanbanBoard(from: summaries, includeArchived: includeArchived)
+        kanbanBoardSlug = board.chrome.slug
+        return board
+    }
+
+    func useKanbanBoardForTesting(_ slug: String) {
+        kanbanBoardSlug = slug
     }
 
     private static func kanbanBoard(from summaries: [WatchSkillSummary], includeArchived: Bool) -> WatchKanbanBoardLoad {

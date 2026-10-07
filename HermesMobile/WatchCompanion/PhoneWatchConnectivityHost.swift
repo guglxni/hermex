@@ -12,7 +12,8 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
     override private init() {
         let broker = PhoneCompanionBroker(
             epoch: WatchInstallationIdentity.epoch(),
-            backend: APIClientWatchPhoneBackend()
+            backend: APIClientWatchPhoneBackend(),
+            issuedRunStore: WatchIssuedRunFileStore()
         )
         dispatcher = WatchWireDispatcher(
             service: broker,
@@ -43,6 +44,15 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
 
     func sessionDidDeactivate(_ session: WCSession) {
         session.activate()
+    }
+
+    /// Queues a finished reply for the watch. `transferUserInfo` wakes the
+    /// watch app, which posts it as its own notification when Now is not open.
+    func deliverReply(body: String, sessionID: String) {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated else { return }
+        session.transferUserInfo(WatchReplyNotice.userInfo(body: body, sessionID: sessionID))
     }
 
     func session(

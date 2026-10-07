@@ -191,7 +191,7 @@ public protocol WatchPhoneBackend: Sendable {
     func taskRunOutput(urlString: String, jobID: String, runID: String) async throws -> String?
     func controlTask(urlString: String, jobID: String, action: String) async throws
     func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws
-    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws
+    func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws
 }
 
 /// `skills` query the phone treats as a Kanban board read. Any other query
@@ -576,7 +576,7 @@ public extension WatchPhoneBackend {
         throw WatchCompanionError.unsupported(.skills)
     }
 
-    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+    func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
         throw WatchCompanionError.unsupported(.tasks)
     }
 }

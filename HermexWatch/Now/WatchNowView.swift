@@ -62,6 +62,12 @@ struct WatchNowView: View {
                     .accessibilityLabel("Hermex")
             }
         }
+        .onChange(of: model.hasLoadedSessions) { _, loaded in
+            // A complication tap with nowhere to send must not start the
+            // microphone the next time a session appears on its own.
+            guard loaded, model.nowSession == nil else { return }
+            _ = model.consumeComplicationRecording()
+        }
         .refreshable {
             await model.refreshFromList()
             WatchWidgetSnapshotPublisher.publish(model)

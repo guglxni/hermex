@@ -20,6 +20,8 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         var mediaByHandle: [String: CachedMedia]
     }
 
+    private let issuedRunStore: (any WatchIssuedRunStoring)?
+
     private struct CachedMedia {
         let path: String
         let bytes: Data
@@ -28,18 +30,24 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
     public init(
         epoch: InstallationEpoch,
         backend: any WatchPhoneBackend,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        issuedRunStore: (any WatchIssuedRunStoring)? = nil
     ) {
         self.epoch = epoch
         self.backend = backend
         self.now = now
+        self.issuedRunStore = issuedRunStore
+        var restoredRuns: [String: RunKey] = [:]
+        for run in issuedRunStore?.load() ?? [] {
+            restoredRuns[run.streamID] = run
+        }
         self.storage = OSAllocatedUnfairLock(initialState: State(
             fence: ScopeFence(epoch: epoch),
             revision: 0,
             urlByServer: [:],
             generationByServer: [:],
             lastSnapshot: nil,
-            issuedRuns: [:],
+            issuedRuns: restoredRuns,
             mediaByHandle: [:]
         ))
     }
@@ -540,11 +548,12 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         scope: ServerScope,
         cardID: String,
         status: String,
+        boardSlug: String,
         expectedRevision: Revision
     ) async throws {
         guard matchesRevision(expectedRevision) else { throw WatchCompanionError.scopeRejected }
         let urlString = try resolvedURL(for: scope)
-        try await backend.moveKanbanCard(urlString: urlString, cardID: cardID, status: status)
+        try await backend.moveKanbanCard(urlString: urlString, cardID: cardID, status: status, boardSlug: boardSlug)
     }
 
     public func pendingApprovalHead(
@@ -833,12 +842,15 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
 
     public func media(_ descriptor: WatchMediaDescriptor) async throws -> WatchMediaPayload {
         let urlString = try resolvedURL(for: descriptor.scope)
-        if let cached = storage.withLock({ $0.mediaByHandle[descriptor.handle.rawValue] }),
-           cached.bytes.count == descriptor.byteSize {
-            return try WatchMediaPayload(descriptor: descriptor, bytes: cached.bytes)
+        let key = Self.mediaCacheKey(descriptor)
+        let cached = storage.withLock { $0.mediaByHandle[key] }
+        if let cached, let payload = try? WatchMediaPayload(descriptor: descriptor, bytes: cached.bytes) {
+            return payload
         }
-        let path = storage.withLock({ $0.mediaByHandle[descriptor.handle.rawValue]?.path })
-            ?? descriptor.handle.rawValue
+        // A digest or size miss must refetch. The stored path stays, because a
+        // long workspace path is cached under a hash handle, not the path itself.
+        let path = cached?.path ?? descriptor.handle.rawValue
+        storage.withLock { $0.mediaByHandle[key] = nil }
         let raw = try await backend.mediaData(
             urlString: urlString,
             sessionID: descriptor.session.sessionID,
@@ -847,7 +859,7 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         guard let bytes = WatchImageThumbnail.jpeg(from: raw) ?? (raw.count <= WatchImageThumbnail.watchFaceMaxBytes ? raw : nil) else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
-        cacheMedia(handle: descriptor.handle.rawValue, path: path, bytes: bytes)
+        cacheMedia(key: key, path: path, bytes: bytes)
         return try WatchMediaPayload(descriptor: descriptor, bytes: bytes)
     }
 
@@ -905,7 +917,7 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
                 observedAt: observed,
                 expiresAt: observed.addingTimeInterval(120)
             )
-            cacheMedia(handle: handle.rawValue, path: path, bytes: bytes)
+            cacheMedia(key: Self.mediaCacheKey(descriptor), path: path, bytes: bytes)
             return .image(id: id, descriptor: descriptor, alt: alt)
         } catch {
             return nil
@@ -919,12 +931,18 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         return try MediaHandle(sha256Hex(Data(path.utf8)))
     }
 
-    private func cacheMedia(handle: String, path: String, bytes: Data) {
+    /// Session and server ride in the key. The same path on two sessions is
+    /// not the same image, even when the byte counts match.
+    private static func mediaCacheKey(_ descriptor: WatchMediaDescriptor) -> String {
+        "\(descriptor.scope.server.rawValue.uuidString)|\(descriptor.session.sessionID)|\(descriptor.handle.rawValue)"
+    }
+
+    private func cacheMedia(key: String, path: String, bytes: Data) {
         storage.withLock { state in
             if state.mediaByHandle.count >= 16 {
                 state.mediaByHandle.removeAll()
             }
-            state.mediaByHandle[handle] = CachedMedia(path: path, bytes: bytes)
+            state.mediaByHandle[key] = CachedMedia(path: path, bytes: bytes)
         }
     }
 
@@ -940,14 +958,22 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
 
     private func recordIssuedRun(_ run: RunKey) {
         storage.withLock { $0.issuedRuns[run.streamID] = run }
+        persistIssuedRuns()
     }
 
     private func consumeIssuedRun(_ run: RunKey) -> Bool {
-        storage.withLock { state in
+        let removed = storage.withLock { state -> Bool in
             guard state.issuedRuns[run.streamID] == run else { return false }
             state.issuedRuns[run.streamID] = nil
             return true
         }
+        if removed { persistIssuedRuns() }
+        return removed
+    }
+
+    private func persistIssuedRuns() {
+        let runs = storage.withLock { Array($0.issuedRuns.values) }
+        issuedRunStore?.save(runs)
     }
 
     /// Fits a label into the watch DTO byte budget. Returns nil for blank input.

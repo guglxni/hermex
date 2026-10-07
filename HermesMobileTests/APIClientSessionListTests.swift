@@ -489,6 +489,43 @@ final class APIClientSessionListTests: APIClientTestCase {
         XCTAssertEqual(posted, [true, false])
     }
 
+    func testSidebarSessionsRestoresTheAgentSessionGateWhenTheRefetchFails() async throws {
+        var sessionGets = 0
+        var posted: [Bool] = []
+        let client = makeClient { request in
+            let path = try XCTUnwrap(request.url).path
+            let method = request.httpMethod ?? "GET"
+            if path == "/api/settings", method == "POST" {
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Bool])
+                let enabled = try XCTUnwrap(json["show_cli_sessions"])
+                posted.append(enabled)
+                return apiTestJSONResponse(
+                    #"{"show_cli_sessions": \#(enabled)}"#,
+                    for: request
+                )
+            }
+            if path == "/api/settings" {
+                return apiTestJSONResponse(#"{"show_cli_sessions": false}"#, for: request)
+            }
+            sessionGets += 1
+            if sessionGets >= 2 {
+                return apiTestJSONResponse(#"{"detail":"unavailable"}"#, for: request, status: 500)
+            }
+            return apiTestJSONResponse("""
+            {
+              "sessions": [],
+              "other_profile_count": 0
+            }
+            """, for: request)
+        }
+
+        let response = try await client.sidebarSessions()
+
+        XCTAssertEqual(response.sessions ?? [], [])
+        XCTAssertEqual(posted, [true, false])
+    }
+
     func testDisplayTitleKeepsAZeroMessageRowAndAttentionObjectCounts() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

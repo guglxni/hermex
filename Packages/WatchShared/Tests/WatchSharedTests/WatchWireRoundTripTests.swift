@@ -97,7 +97,7 @@ private final class LoopTransport: WatchWireTransporting, @unchecked Sendable {
         try await client.setSkillEnabled(scope: scope, name: "web-search", enabled: false, expectedRevision: registry.revision)
         #expect(backend.skillToggles.map { "\($0.name):\($0.enabled)" } == ["web-search:false"])
 
-        try await client.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", expectedRevision: registry.revision)
+        try await client.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", boardSlug: "default", expectedRevision: registry.revision)
         #expect(backend.kanbanMoves.map(\.status) == ["Done"])
 
         let active = try await client.switchActiveProfile(scope: scope, name: "builder", expectedRevision: registry.revision)
@@ -113,7 +113,7 @@ private final class LoopTransport: WatchWireTransporting, @unchecked Sendable {
         )
         let messages: [WatchWireMessage] = [
             .setSkillEnabled(try WatchSkillToggleRequest(scope: scope, expectedRevision: Revision(3), name: " web-search ", enabled: true)),
-            .moveKanbanCard(try WatchKanbanMoveRequest(scope: scope, expectedRevision: Revision(3), cardID: " card-1 ", status: " Done ")),
+            .moveKanbanCard(try WatchKanbanMoveRequest(scope: scope, expectedRevision: Revision(3), cardID: " card-1 ", status: " Done ", boardSlug: " default ")),
             .createKanbanCard(try WatchKanbanCreateRequest(scope: scope, expectedRevision: Revision(3), boardSlug: " default ", title: " Ship it ", status: " ToDo ")),
             .dispatchKanban(try WatchKanbanDispatchRequest(scope: scope, expectedRevision: Revision(3), boardSlug: " default ", dryRun: true)),
             .switchProfile(try WatchProfileSwitchRequest(scope: scope, expectedRevision: Revision(3), name: " builder ")),
@@ -127,7 +127,7 @@ private final class LoopTransport: WatchWireTransporting, @unchecked Sendable {
             _ = try WatchSkillToggleRequest(scope: scope, expectedRevision: Revision(3), name: "   ", enabled: true)
         }
         #expect(throws: (any Error).self) {
-            _ = try WatchKanbanMoveRequest(scope: scope, expectedRevision: Revision(3), cardID: "card-1", status: "  ")
+            _ = try WatchKanbanMoveRequest(scope: scope, expectedRevision: Revision(3), cardID: "card-1", status: "  ", boardSlug: "default")
         }
         #expect(throws: (any Error).self) {
             _ = try WatchKanbanCreateRequest(scope: scope, expectedRevision: Revision(3), boardSlug: "default", title: "  ", status: "triage")
@@ -150,7 +150,7 @@ private final class ScriptedPhoneBackend: WatchPhoneBackend, @unchecked Sendable
     func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws {
         skillToggles.append((name, enabled))
     }
-    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+    func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
         kanbanMoves.append((cardID, status))
     }
     func switchProfile(urlString: String, name: String) async throws {

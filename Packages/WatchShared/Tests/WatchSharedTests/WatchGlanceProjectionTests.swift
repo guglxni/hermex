@@ -152,4 +152,24 @@ import Testing
         #expect(WatchTaskRunProjection.responseBody(content) == "All green")
         #expect(WatchTaskRunProjection.responseBody("No heading here") == "No heading here")
     }
+
+    @Test func complicationTapIsTheRecordLink() {
+        #expect(WatchComplicationLink.isRecord(WatchComplicationLink.record))
+        #expect(WatchComplicationLink.isRecord(URL(string: "hermex-watch://board")!) == false)
+    }
+
+    @Test func replyNoticeKeepsTheLatestAssistantWordsAndFitsANotification() {
+        let blocks = [
+            WatchPhoneTranscriptPage.Block(id: "u", role: .user, text: "Status?"),
+            WatchPhoneTranscriptPage.Block(id: "a", role: .assistant, text: "The garage door is closed."),
+        ]
+        let body = WatchReplyNotice.assistantText(in: blocks)
+        #expect(body == "The garage door is closed.")
+        let info = WatchReplyNotice.userInfo(body: body ?? "", sessionID: "s1")
+        #expect(WatchReplyNotice.body(in: info) == "The garage door is closed.")
+        let long = String(repeating: "word ", count: 80)
+        #expect(WatchReplyNotice.clip(long).count == WatchReplyNotice.maximumBodyCharacters)
+        #expect(WatchReplyNotice.clip(long).hasSuffix("…"))
+        #expect(WatchReplyNotice.body(in: ["kind": "other"]) == nil)
+    }
 }

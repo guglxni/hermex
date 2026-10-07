@@ -750,6 +750,7 @@ extension WatchRootModelTests {
         XCTAssertTrue(tasks.isEmpty)
 
         let toggled = await model.setSkillEnabled(name: "web-search", enabled: false)
+        model.useKanbanBoardForTesting("default")
         let moved = await model.moveKanbanCard(cardID: "card-1", status: "Done")
         let ran = await model.controlTask(jobID: "job-1", action: .run)
         XCTAssertTrue(toggled)
@@ -785,6 +786,7 @@ extension WatchRootModelTests {
         XCTAssertFalse(toggled)
         XCTAssertEqual(model.errorCopy, "Couldn’t update that skill.")
         XCTAssertNil(model.sidebarErrorCopy)
+        model.useKanbanBoardForTesting("default")
         let moved = await model.moveKanbanCard(cardID: "card-1", status: "Done")
         XCTAssertFalse(moved)
         XCTAssertEqual(model.errorCopy, "Couldn’t move that card.")
@@ -971,7 +973,7 @@ private final class RootScriptedBackend: WatchPhoneBackend, @unchecked Sendable 
     func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws {
         skillToggles.append((name, enabled))
     }
-    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+    func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
         kanbanMoves.append((cardID, status))
     }
 

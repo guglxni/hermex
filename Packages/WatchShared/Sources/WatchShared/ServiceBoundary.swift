@@ -34,7 +34,7 @@ public protocol WatchCompanionServicing:Sendable{
  func sendBot(text:String,to key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
  func interruptBot(key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
  func setSkillEnabled(scope:ServerScope,name:String,enabled:Bool,expectedRevision:Revision)async throws
- func moveKanbanCard(scope:ServerScope,cardID:String,status:String,expectedRevision:Revision)async throws
+ func moveKanbanCard(scope:ServerScope,cardID:String,status:String,boardSlug:String,expectedRevision:Revision)async throws
  func createKanbanCard(scope:ServerScope,boardSlug:String,title:String,status:String,expectedRevision:Revision)async throws
  func dispatchKanban(scope:ServerScope,boardSlug:String,dryRun:Bool,expectedRevision:Revision)async throws->String
 }
@@ -42,7 +42,7 @@ public protocol WatchCompanionServicing:Sendable{
 public extension WatchCompanionServicing {
  func switchActiveProfile(scope:ServerScope,name:String,expectedRevision:Revision)async throws->String{throw WatchCompanionError.unsupported(.composerOptions)}
  func setSkillEnabled(scope:ServerScope,name:String,enabled:Bool,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.skills)}
- func moveKanbanCard(scope:ServerScope,cardID:String,status:String,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.tasks)}
+ func moveKanbanCard(scope:ServerScope,cardID:String,status:String,boardSlug:String,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.tasks)}
  func createKanbanCard(scope:ServerScope,boardSlug:String,title:String,status:String,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.tasks)}
  func dispatchKanban(scope:ServerScope,boardSlug:String,dryRun:Bool,expectedRevision:Revision)async throws->String{throw WatchCompanionError.unsupported(.tasks)}
  func respond(approval:ApprovalKey,choice:ApprovalChoice,context:CommandContext)async->CommandReceipt<EmptyValue>{currentPinAttentionRejection(context:context,operationKind:.respondApproval)}

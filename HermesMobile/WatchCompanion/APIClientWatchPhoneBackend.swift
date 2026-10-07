@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import WatchShared
 
 /// Phone execution port: scoped `APIClient` calls, never a watch-invented endpoint.
@@ -645,23 +646,22 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// Only the wrist's destinations (the iPhone's ordinary moves plus Done);
     /// success means the server's returned Card carries the new status, the
     /// same settlement rule the iPhone Kanban screen uses.
-    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
-        guard WatchKanbanStatus.moveDestinations(from: "").contains(status) else {
+    func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
+        guard WatchKanbanStatus.moveDestinations(from: "").contains(status.lowercased()) else {
+            throw WatchCompanionError.backend(.invalidResponse)
+        }
+        let slug = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !slug.isEmpty else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
         let client = try client(for: urlString)
-        let boards = try await call(urlString) { try await $0.kanbanBoards() }
-        let preferred = Self.savedBoardSlug(for: urlString)
-        guard let slug = Self.boardSlugsToTry(in: boards, preferred: preferred).first else {
-            throw WatchCompanionError.backend(.invalidResponse)
-        }
         let response = try await call(urlString) { _ in
             try await client.setKanbanCardStatus(
                 KanbanCardStatusRequest(cardID: cardID, board: slug, status: status)
             )
         }
         let card = try KanbanCardMutationValidator.validate(response, expectedCardID: cardID)
-        guard card.status?.rawValue.lowercased() == status else {
+        guard card.status?.rawValue.lowercased() == status.lowercased() else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
     }
@@ -731,7 +731,49 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         guard let streamID = response.streamId, !streamID.isEmpty else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
+        let noticeURL = urlString
+        let noticeSession = sessionID
+        let noticeStream = streamID
+        Task {
+            await self.deliverReplyWhenSettled(
+                urlString: noticeURL,
+                sessionID: noticeSession,
+                streamID: noticeStream
+            )
+        }
         return streamID
+    }
+
+    /// A watch-started run returns as soon as the stream id exists. This waits
+    /// for that stream to finish, then hands the reply to the watch as a
+    /// notification. A long run that outlives the phone's background time still
+    /// shows on Now the next time the wrist opens it.
+    private func deliverReplyWhenSettled(urlString: String, sessionID: String, streamID: String) async {
+        let token = await MainActor.run {
+            UIApplication.shared.beginBackgroundTask(withName: "hermex.watch.reply") {}
+        }
+        defer {
+            let ending = token
+            if ending != .invalid {
+                Task { @MainActor in UIApplication.shared.endBackgroundTask(ending) }
+            }
+        }
+        for attempt in 0..<12 {
+            if attempt > 0 {
+                try? await Task.sleep(for: .seconds(2))
+            }
+            if Task.isCancelled { return }
+            if let phase = try? await runPhase(urlString: urlString, sessionID: sessionID, streamID: streamID),
+               phase.isTerminal {
+                break
+            }
+        }
+        guard let page = try? await transcript(urlString: urlString, sessionID: sessionID, before: nil, limit: 8),
+              let body = WatchReplyNotice.assistantText(in: page.blocks)
+        else { return }
+        await MainActor.run {
+            PhoneWatchConnectivityHost.shared.deliverReply(body: body, sessionID: sessionID)
+        }
     }
 
     func uploadFile(

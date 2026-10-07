@@ -119,6 +119,7 @@ public struct WatchWireDispatcher: Sendable {
                 scope: request.scope,
                 cardID: request.cardID,
                 status: request.status,
+                boardSlug: request.boardSlug,
                 expectedRevision: request.expectedRevision
             )
             return .transcript(request.cardID)

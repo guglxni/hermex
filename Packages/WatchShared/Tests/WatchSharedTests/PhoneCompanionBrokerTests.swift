@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import WatchShared
@@ -40,7 +41,8 @@ import Testing
         var kanban: [WatchPhoneKanbanCardGlance] = []
         var controlledTasks: [(jobID: String, action: String)] = []
         var skillToggles: [(name: String, enabled: Bool)] = []
-        var kanbanMoves: [(cardID: String, status: String)] = []
+        var kanbanMoves: [(cardID: String, status: String, boardSlug: String)] = []
+        var mediaBySessionAndPath: [String: Data] = [:]
         var failWrites = false
 
         init(
@@ -93,6 +95,9 @@ import Testing
             )
         }
         func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
+            if let data = mediaBySessionAndPath["\(sessionID)|\(path)"] {
+                return data
+            }
             guard let data = mediaByPath[path] else {
                 throw WatchCompanionError.backend(.invalidResponse)
             }
@@ -139,9 +144,9 @@ import Testing
             if failWrites { throw WatchCompanionError.backend(.timeout) }
             skillToggles.append((name, enabled))
         }
-        func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+        func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
             if failWrites { throw WatchCompanionError.backend(.timeout) }
-            kanbanMoves.append((cardID, status))
+            kanbanMoves.append((cardID, status, boardSlug))
         }
         var taskRuns: [WatchPhoneTaskRun] = []
         var taskOutput: String?
@@ -472,6 +477,44 @@ import Testing
         let receipt = await broker.stop(run: run, context: context)
         #expect(receipt.receipt.phase == .acknowledged)
         #expect(backend.cancelledStreamIDs == ["stream-1"])
+    }
+
+    @Test func stopStillWorksAfterThePhoneBrokerIsRecreated() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = WatchIssuedRunFileStore(directory: directory)
+        let epoch = InstallationEpoch(rawValue: UUID())
+        let first = PhoneCompanionBroker(epoch: epoch, backend: backend, now: { Date(timeIntervalSince1970: 1_700_000_000) }, issuedRunStore: store)
+        let registry = await first.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let session = try SessionKey(scope: scope, sessionID: "s1")
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let context = try CommandContext(
+            stableCommandID: CommandID(rawValue: UUID()),
+            scope: scope,
+            expectedRevision: registry.revision,
+            createdAt: created,
+            expiresAt: created.addingTimeInterval(60)
+        )
+        let started = await first.send(text: "continue", to: session, context: context)
+        let run = try #require(started.value)
+
+        let restarted = PhoneCompanionBroker(epoch: epoch, backend: backend, now: { Date(timeIntervalSince1970: 1_700_000_000) }, issuedRunStore: store)
+        let refreshed = await restarted.registry()
+        let stopContext = try CommandContext(
+            stableCommandID: CommandID(rawValue: UUID()),
+            scope: scope,
+            expectedRevision: refreshed.revision,
+            createdAt: created,
+            expiresAt: created.addingTimeInterval(60)
+        )
+        let receipt = await restarted.stop(run: run, context: stopContext)
+        #expect(receipt.receipt.phase == .acknowledged)
+        #expect(backend.cancelledStreamIDs == ["stream-1"])
+        try? FileManager.default.removeItem(at: directory)
     }
 
     @Test func transcribeVoiceNoteUsesTheScopedServer() async throws {
@@ -830,8 +873,9 @@ import Testing
         try await broker.setSkillEnabled(scope: scope, name: "web-search", enabled: false, expectedRevision: registry.revision)
         #expect(backend.skillToggles.map(\.enabled) == [false])
 
-        try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", expectedRevision: registry.revision)
+        try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", boardSlug: "default", expectedRevision: registry.revision)
         #expect(backend.kanbanMoves.map(\.status) == ["Done"])
+        #expect(backend.kanbanMoves.map(\.boardSlug) == ["default"])
     }
 
     /// Reads are fenced only on the scope, writes also on the registry revision.
@@ -862,7 +906,7 @@ import Testing
             try await broker.setSkillEnabled(scope: scope, name: "web-search", enabled: false, expectedRevision: stale)
         }
         await #expect(throws: WatchCompanionError.scopeRejected) {
-            try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", expectedRevision: stale)
+            try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", boardSlug: "default", expectedRevision: stale)
         }
         await #expect(throws: WatchCompanionError.scopeRejected) {
             _ = try await broker.switchActiveProfile(scope: scope, name: "builder", expectedRevision: stale)
@@ -893,6 +937,90 @@ import Testing
         }
     }
 
+    @Test func samePathOnTwoSessionsLoadsBothImages() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let first = Data([1, 2, 3, 4])
+        let second = Data([9, 8, 7, 6])
+        backend.mediaBySessionAndPath["sess-a|shot.jpg"] = first
+        backend.mediaBySessionAndPath["sess-b|shot.jpg"] = second
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+
+        let loadedFirst = try await broker.media(imageDescriptor(scope: scope, sessionID: "sess-a", bytes: first))
+        let loadedSecond = try await broker.media(imageDescriptor(scope: scope, sessionID: "sess-b", bytes: second))
+
+        #expect(loadedFirst.bytes == first)
+        #expect(loadedSecond.bytes == second)
+    }
+
+    @Test func aReplacedImageOfTheSameSizeIsFetchedAgain() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let first = Data([1, 2, 3, 4])
+        let second = Data([9, 8, 7, 6])
+        backend.mediaByPath["shot.jpg"] = first
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+
+        _ = try await broker.media(imageDescriptor(scope: scope, sessionID: "sess-a", bytes: first))
+        backend.mediaByPath["shot.jpg"] = second
+        let replaced = try await broker.media(imageDescriptor(scope: scope, sessionID: "sess-a", bytes: second))
+
+        #expect(replaced.bytes == second)
+    }
+
+    @Test func issuedRunsStayStoppableForSixHoursAndThenExpire() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermex-issued-runs-\(UUID().uuidString)", isDirectory: true)
+        let store = WatchIssuedRunFileStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let scope = ServerScope(
+            epoch: InstallationEpoch(rawValue: UUID()),
+            server: ServerID.derived(from: "https://alpha.example"),
+            generation: try Generation(1)
+        )
+        let run = try RunKey(session: SessionKey(scope: scope, sessionID: "sess-a"), streamID: "stream-1")
+        store.save([run])
+        #expect(store.load().map(\.streamID) == ["stream-1"])
+
+        let file = directory.appendingPathComponent("hermex-watch-issued-runs.json")
+        let fresh = try JSONDecoder().decode([StampedIssuedRun].self, from: Data(contentsOf: file))
+        let aged = fresh.map { StampedIssuedRun(run: $0.run, savedAt: Date().addingTimeInterval(-(7 * 60 * 60))) }
+        try JSONEncoder().encode(aged).write(to: file)
+        #expect(store.load().isEmpty)
+
+        let stillValid = fresh.map { StampedIssuedRun(run: $0.run, savedAt: Date().addingTimeInterval(-(5 * 60 * 60))) }
+        try JSONEncoder().encode(stillValid).write(to: file)
+        store.save([run])
+        let kept = try JSONDecoder().decode([StampedIssuedRun].self, from: Data(contentsOf: file))
+        let savedAt = try #require(kept.first?.savedAt)
+        #expect(abs(savedAt.timeIntervalSinceNow) > 4 * 60 * 60)
+    }
+
+    private func imageDescriptor(scope: ServerScope, sessionID: String, bytes: Data) throws -> WatchMediaDescriptor {
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let observed = Date(timeIntervalSince1970: 1_700_000_000)
+        return try WatchMediaDescriptor(
+            scope: scope,
+            session: SessionKey(scope: scope, sessionID: sessionID),
+            origin: OriginBinding(digest: digest),
+            handle: MediaHandle("shot.jpg"),
+            mimeType: "image/jpeg",
+            byteSize: bytes.count,
+            sha256: digest,
+            observedAt: observed,
+            expiresAt: observed.addingTimeInterval(120)
+        )
+    }
+
     private func context(scope: ServerScope, revision: Revision) throws -> CommandContext {
         let created = Date(timeIntervalSince1970: 1_700_000_000)
         return try CommandContext(
@@ -903,4 +1031,11 @@ import Testing
             expiresAt: created.addingTimeInterval(60)
         )
     }
+}
+
+/// Mirrors the phone's issued-run file so a test can age a stamp without
+/// calling the clock inside the store.
+private struct StampedIssuedRun: Codable {
+    var run: RunKey
+    var savedAt: Date
 }

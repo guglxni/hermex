@@ -105,11 +105,19 @@ extension APIClient {
             return fallback
         }
 
-        let refreshed = try await sessions(
-            includeArchived: includeArchived,
-            archivedLimit: archivedLimit,
-            allProfiles: allProfiles
-        )
+        let refreshed: SessionsResponse
+        do {
+            refreshed = try await sessions(
+                includeArchived: includeArchived,
+                archivedLimit: archivedLimit,
+                allProfiles: allProfiles
+            )
+        } catch {
+            // The gate was opened above. A failed refetch must put it back,
+            // or one sidebar miss leaves show_cli_sessions on for every client.
+            _ = try? await updateSettings(showCliSessions: false)
+            return fallback
+        }
         if refreshed.containsSidebarRows(includeArchived: includeArchived) {
             return refreshed
         }

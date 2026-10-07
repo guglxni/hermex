@@ -46,6 +46,14 @@ struct WatchSpeakControls: View {
             // open behind it.
             if reduced, capture.phase == .recording { cancelVoice() }
         }
+        .onChange(of: model.complicationRecordID) { _, id in
+            guard id != nil else { return }
+            Task { await startFromComplication() }
+        }
+        .onAppear {
+            guard model.complicationRecordID != nil else { return }
+            Task { await startFromComplication() }
+        }
         .onDisappear {
             // Leaving the screen must not leave the microphone open.
             if capture.phase == .recording {
@@ -319,6 +327,13 @@ struct WatchSpeakControls: View {
     }
 
     // MARK: Voice
+
+    /// A complication tap lands here. The recording panel replaces the
+    /// controls, so Send is not the thing the tap itself does.
+    private func startFromComplication() async {
+        guard model.consumeComplicationRecording() else { return }
+        await startVoice()
+    }
 
     private func startVoice() async {
         guard capture.phase == .idle || isFailed else { return }

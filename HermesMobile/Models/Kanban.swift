@@ -551,15 +551,48 @@ struct KanbanColumn: Decodable, Equatable, Sendable {
         while !array.isAtEnd {
             if let card = try? array.decode(KanbanCard.self) {
                 decoded.append(card)
-            } else {
-                _ = try? array.decode(DiscardedKanbanValue.self)
+                continue
             }
+            // A failed decode does not advance the container. The fallback has
+            // to succeed for a scalar, or this loop never reaches the next card.
+            guard (try? array.decode(DiscardedKanbanValue.self)) != nil else { break }
         }
         return decoded
     }
 }
 
-private struct DiscardedKanbanValue: Decodable {}
+/// Consumes one JSON value of any shape so a bad card does not stall the column.
+private struct DiscardedKanbanValue: Decodable {
+    init(from decoder: Decoder) throws {
+        if var unkeyed = try? decoder.unkeyedContainer() {
+            while !unkeyed.isAtEnd {
+                _ = try unkeyed.decode(DiscardedKanbanValue.self)
+            }
+            return
+        }
+        if let keyed = try? decoder.container(keyedBy: DiscardedKanbanKey.self) {
+            for key in keyed.allKeys {
+                _ = try keyed.decode(DiscardedKanbanValue.self, forKey: key)
+            }
+            return
+        }
+        let single = try decoder.singleValueContainer()
+        if single.decodeNil() { return }
+        if (try? single.decode(Bool.self)) != nil { return }
+        if (try? single.decode(Double.self)) != nil { return }
+        if (try? single.decode(String.self)) != nil { return }
+    }
+}
+
+private struct DiscardedKanbanKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) {
+        self.stringValue = "\(intValue)"
+        self.intValue = intValue
+    }
+}
 
 struct KanbanCard: Decodable, Equatable, Sendable {
     let cardID: String?

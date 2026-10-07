@@ -164,12 +164,13 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
         throw failureAsError(reply)
     }
 
-    public func moveKanbanCard(scope: ServerScope, cardID: String, status: String, expectedRevision: Revision) async throws {
+    public func moveKanbanCard(scope: ServerScope, cardID: String, status: String, boardSlug: String, expectedRevision: Revision) async throws {
         let request = try WatchKanbanMoveRequest(
             scope: scope,
             expectedRevision: expectedRevision,
             cardID: cardID,
-            status: status
+            status: status,
+            boardSlug: boardSlug
         )
         let reply = try await transport.send(.moveKanbanCard(request))
         if case .failure = reply { throw WatchCompanionError.backend(.invalidResponse) }

@@ -177,15 +177,18 @@ public struct WatchKanbanMoveRequest: Hashable, Codable, Sendable {
     public let expectedRevision: Revision
     public let cardID: String
     public let status: String
+    public let boardSlug: String
 
-    public init(scope: ServerScope, expectedRevision: Revision, cardID: String, status: String) throws {
+    public init(scope: ServerScope, expectedRevision: Revision, cardID: String, status: String, boardSlug: String) throws {
         let card = cardID.trimmingCharacters(in: .whitespacesAndNewlines)
         let column = status.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !card.isEmpty, !column.isEmpty else { throw IdentityValidationError.blankIdentifier }
+        let board = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !card.isEmpty, !column.isEmpty, !board.isEmpty else { throw IdentityValidationError.blankIdentifier }
         self.scope = scope
         self.expectedRevision = expectedRevision
         self.cardID = card
         self.status = column
+        self.boardSlug = board
     }
 }
 

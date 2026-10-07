@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 import WatchConnectivity
 import WatchShared
 import HermexWatchRoot
@@ -13,6 +14,8 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
     /// app can refresh the model. WCSession delivers delegate calls on the main
     /// queue, so this is a plain `@Sendable` closure the app hops to `@MainActor`.
     var reachabilityChanged: (@Sendable (Bool) -> Void)?
+    /// A finished reply the phone pushed over WatchConnectivity.
+    var replyArrived: (@Sendable (String) -> Void)?
 
     func activate() {
         guard WCSession.isSupported() else { return }
@@ -49,6 +52,10 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
                 url,
                 metadata: [metadataKey: transferID.uuidString]
             )
+            // A quiet phone never calls didFinish. Sending must be able to fail.
+            DispatchQueue.global().asyncAfter(deadline: .now() + WCSessionTransport.mediaTransferTimeout) { [weak self] in
+                self?.finishTransfer(transferID, error: WatchCompanionError.phoneUnavailable)
+            }
         }
     }
 
@@ -65,6 +72,11 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
         reachabilityChanged?(session.isReachable)
     }
 
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        guard let body = WatchReplyNotice.body(in: userInfo) else { return }
+        replyArrived?(body)
+    }
+
     func sessionReachabilityDidChange(_ session: WCSession) {
         // The phone became reachable or quiet. The model decides which: reachable
         // → reload registry; unreachable → honest disconnected state (not a stale
@@ -78,6 +90,10 @@ final class WatchSessionActivator: NSObject, WCSessionDelegate, @unchecked Senda
         guard let raw, let transferID = UUID(uuidString: raw) else {
             return
         }
+        finishTransfer(transferID, error: error)
+    }
+
+    private func finishTransfer(_ transferID: UUID, error: Error?) {
         lock.lock()
         let waiter = fileWaiters.removeValue(forKey: transferID)
         lock.unlock()
@@ -176,11 +192,15 @@ struct WCSessionTransport: WatchWireTransporting {
     /// Tasks and Kanban on a spinner. Voice notes and photos still wait: they
     /// block on transcription and upload.
     static let reachableReplyTimeout: TimeInterval = 40
+    /// Voice notes and photos used to wait forever for the file hop and the
+    /// phone's reply. Three minutes covers a long clip, then Sending can fail.
+    static let mediaTransferTimeout: TimeInterval = 60
+    static let mediaReplyTimeout: TimeInterval = 180
 
     private func replyTimeout(for message: WatchWireMessage) -> TimeInterval? {
         switch message {
         case .transcribe, .transcribeFile, .sendPhoto, .sendPhotoFile:
-            return nil
+            return Self.mediaReplyTimeout
         case .registry:
             return Self.registryReplyTimeout
         default:
@@ -219,6 +239,27 @@ struct WCSessionTransport: WatchWireTransporting {
                 )
             }
         }
+    }
+}
+
+/// Posts one reply as a watch notification. Authorization is requested while
+/// the app is open, so a later background delivery can present it.
+enum WatchReplyNotifier {
+    static func prepare() async {
+        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+    }
+
+    static func post(_ body: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = "Hermex"
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "hermex-reply-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        try? await UNUserNotificationCenter.current().add(request)
     }
 }
 

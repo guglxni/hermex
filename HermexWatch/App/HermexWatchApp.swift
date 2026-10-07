@@ -1,5 +1,6 @@
 import SwiftUI
 import HermexWatchRoot
+import WatchShared
 
 @main
 struct HermexWatchApp: App {
@@ -20,11 +21,18 @@ struct HermexWatchApp: App {
                     }
                     #endif
                     wireReachability()
+                    wireReplyNotice()
                     WatchSessionActivator.shared.activate()
                     model.attach(link: WatchConnectivitySessionLink())
                     WatchWidgetSnapshotPublisher.publish(model)
+                    Task { await WatchReplyNotifier.prepare() }
+                }
+                .onOpenURL { url in
+                    guard WatchComplicationLink.isRecord(url) else { return }
+                    model.armComplicationRecording()
                 }
                 .onChange(of: scenePhase) { _, phase in
+                    model.setWatchForeground(phase == .active)
                     // Returning to the foreground reloads the registry so an
                     // iPhone active-server switch while the watch was
                     // backgrounded is followed, and a quiet phone is surfaced
@@ -43,6 +51,18 @@ struct HermexWatchApp: App {
     /// reconnect (after backgrounding, or a quiet phone waking up) refreshes
     /// the wrist. The watch never talks to hermes-webui here — it only asks the
     /// model to re-attach its WatchConnectivity link.
+    /// A finished watch-started reply. If the wrist isn't looking at Now,
+    /// it becomes its own notification. The full turn is still on the card.
+    private func wireReplyNotice() {
+        WatchSessionActivator.shared.replyArrived = { body in
+            Task { @MainActor in
+                await model.refreshFromList()
+                guard !model.isWatchForeground else { return }
+                await WatchReplyNotifier.post(body)
+            }
+        }
+    }
+
     private func wireReachability() {
         WatchSessionActivator.shared.reachabilityChanged = { reachable in
             Task { @MainActor in

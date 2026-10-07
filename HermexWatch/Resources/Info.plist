@@ -20,7 +20,18 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
-    <key>HermexWatchAppGroupIdentifier</key>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>hermex.watch.record</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>hermex-watch</string>
+			</array>
+		</dict>
+	</array>
+	<key>HermexWatchAppGroupIdentifier</key>
     <string>$(APP_GROUP_IDENTIFIER).watch</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Hermex records a short voice note on your watch. Your iPhone transcribes it and sends the recording to your Hermes session.</string>

@@ -10,7 +10,7 @@ struct HermexWatchWidget: Widget {
             HermexWatchWidgetView(entry: entry)
         }
         .configurationDisplayName("Hermex")
-        .description("Glance whether a session is running or needs you.")
+        .description("Tap to record a voice note. Shows when a session is running or needs you.")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -36,8 +36,10 @@ private struct HermexWatchWidgetView: View {
                 }
             }
         }
+        .widgetURL(WatchComplicationLink.record)
         .containerBackground(.fill.tertiary, for: .widget)
         .accessibilityLabel(accessibilityText)
+        .accessibilityHint("Starts a voice note. You can cancel before it sends.")
     }
 
     private var symbolName: String {
