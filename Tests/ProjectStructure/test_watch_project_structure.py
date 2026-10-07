@@ -23,6 +23,7 @@ WATCH_SHARED_TARGETS = {
 AUTHORIZED_IOS_WATCH_COMPANION_SOURCES = {
     "WatchInstallationIdentity.swift",
     "APIClientWatchPhoneBackend.swift",
+    "WatchVoiceNoteTranscription.swift",
     "PhoneWatchConnectivityHost.swift",
 }
 
