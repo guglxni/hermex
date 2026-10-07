@@ -54,7 +54,10 @@ final class AuthManager {
         return passkeyOnlyMessage
     }
 
-    private(set) var state: State = .unconfigured
+    private(set) var state: State = .unconfigured {
+        // The shared Bot connection signs in with the active server's saved credentials.
+        didSet { if let old = oldValue.server, old != state.server { hermesConnections.retire(server: old) } }
+    }
     private(set) var lastErrorMessage: String?
 
     /// Observable snapshot of every configured server, mirrored from the
@@ -72,6 +75,9 @@ final class AuthManager {
     private let headerStore: CustomHeaderStore
     private let logoutTimeout: Duration
     private let serverRegistry: ServerRegistry
+    private let hermesConnections: HermesConnections
+    /// Where the Bot Mode gate is read (`BotModeGate`), which adding a Hermes server needs.
+    private let preferences: UserDefaults
 
     init(
         keychain: any KeychainStoring = KeychainStore(),
@@ -81,7 +87,9 @@ final class AuthManager {
         },
         headerStore: CustomHeaderStore = .shared,
         logoutTimeout: Duration = .seconds(5),
-        serverRegistry: ServerRegistry = .shared
+        serverRegistry: ServerRegistry = .shared,
+        hermesConnections: HermesConnections? = nil,
+        preferences: UserDefaults = .standard
     ) {
         self.keychain = keychain
         self.clientFactory = clientFactory
@@ -89,13 +97,25 @@ final class AuthManager {
         self.headerStore = headerStore
         self.logoutTimeout = logoutTimeout
         self.serverRegistry = serverRegistry
+        self.hermesConnections = hermesConnections ?? .shared
+        self.preferences = preferences
         restoreSavedServer()
         refreshServers()
+        self.hermesConnections.onSignInRejected = { [weak self] server in self?.hermesSignInRejected(server: server) }
     }
 
     /// The active server's id (its normalized URL string), or nil when
     /// unconfigured. Used by the Settings list to mark which row is active.
     var activeServerID: String? { state.server?.absoluteString }
+
+    /// The active server's registry entry, or nil when unconfigured.
+    var activeServer: ServerAccount? { servers.first { $0.id == activeServerID } }
+
+    /// What `server` is. A URL missing from the registry reads as webui, the only kind
+    /// before #899.
+    func kind(of server: URL) -> ServerKind {
+        servers.first { $0.id == server.absoluteString }?.kind ?? .webui
+    }
 
     /// Re-reads the registry into the observable `servers` snapshot. Called after
     /// every registry mutation routed through this manager.
@@ -148,6 +168,11 @@ final class AuthManager {
 
         do {
             let serverURL = try Self.normalizedServerURL(from: serverURLString)
+            // A webui server and a Hermes server never share a URL (#899).
+            guard kind(of: serverURL) == .webui else {
+                lastErrorMessage = String(localized: "This server is already configured.")
+                return
+            }
             let client = clientFactory(serverURL)
             let authStatus = try await testConnection(client: client)
 
@@ -275,6 +300,110 @@ final class AuthManager {
         }
     }
 
+    /// Adds (and switches to) a Hermes server (#899): `connection` is a sign-in the
+    /// connection form or dev sign-in has already verified, and becomes the server's own
+    /// record, saved under its address, which is also the server's id. Needs Bot Mode on
+    /// (`BotModeGate`); refuses an address already in the registry, as `addServer` does, so
+    /// a webui server and a Hermes server never share a URL (`replaceWebuiServer` swaps
+    /// one for the other). Returns whether it was added.
+    @discardableResult
+    func addHermesServer(_ connection: BotConnection) -> Bool {
+        lastErrorMessage = nil
+        guard BotModeGate.isEnabled(in: preferences) else { return false }
+        let server = (try? BotConnection.address(connection.address.absoluteString)) ?? connection.address
+        guard !serverRegistry.servers.contains(where: { $0.id == server.absoluteString }) else {
+            lastErrorMessage = String(localized: "This server is already configured.")
+            return false
+        }
+        do {
+            try BotConnectionStore(keychain: keychain).save(connection, server: server)
+            try keychain.save(server.absoluteString, forKey: .serverURL)
+        } catch {
+            lastErrorMessage = String(localized: "Could not save sign-in details on this iPhone.")
+            return false
+        }
+        serverRegistry.activate(url: server, kind: .hermes, serverVersion: connection.hermesVersion)
+        refreshServers()
+        // The Shortcuts Profile list belonged to the server this replaces as active (#339).
+        ProfileEntityCache.shared.save([])
+        enterActiveServer(server)
+        return true
+    }
+
+    /// Replaces the webui server saved at `connection`'s address with a Hermes server, for a
+    /// host that moved from hermes-webui to the dashboard (#1027). `connection` is a sign-in
+    /// already verified, as for `addHermesServer`. The webui server goes as `removeServer`
+    /// takes it (its sign-in, cache and drafts on this iPhone), and the Hermes server keeps
+    /// its name, initials and color. Refuses unless a webui server is saved there. Returns
+    /// whether the Hermes server was added.
+    func replaceWebuiServer(with connection: BotConnection) async -> Bool {
+        lastErrorMessage = nil
+        guard BotModeGate.isEnabled(in: preferences) else { return false }
+        let server = (try? BotConnection.address(connection.address.absoluteString)) ?? connection.address
+        guard let webui = servers.first(where: { $0.id == server.absoluteString }), webui.kind == .webui else {
+            lastErrorMessage = String(localized: "This server is already configured.")
+            return false
+        }
+        // No suspension between the removal's last step and the add, so no screen ever
+        // shows the server the removal falls back to.
+        await removeServer(webui)
+        guard addHermesServer(connection), let added = activeServer else { return false }
+        updateServerIdentity(added, displayName: webui.displayName, initials: webui.initials,
+                             headerLogoColorHex: webui.headerLogoColorHex)
+        return true
+    }
+
+    /// A Hermes sign-in a webui server keeps for its Bots, which the connect form offers
+    /// to copy into a new Hermes server at the same address (#900).
+    struct SavedHermesSignIn: Equatable {
+        /// The webui server that keeps it, named as Settings → Servers names it.
+        let serverName: String
+        let connection: BotConnection
+    }
+
+    /// The sign-ins configured webui servers keep for exactly `address`, each saved address
+    /// parsed by `BotConnection.address(_:)` as the typed one was. Never matched by
+    /// `install_id`: it comes from the public `/api/status`, so any host could report
+    /// another's and be offered its saved password.
+    func savedHermesSignIns(at address: URL) -> [SavedHermesSignIn] {
+        let store = BotConnectionStore(keychain: keychain)
+        return servers.compactMap { account in
+            guard account.kind == .webui, let server = URL(string: account.urlString),
+                  let saved = try? store.load(server: server),
+                  (try? BotConnection.address(saved.address.absoluteString)) == address else { return nil }
+            let name = account.displayName.isEmpty ? (server.host ?? account.urlString) : account.displayName
+            return SavedHermesSignIn(serverName: name, connection: saved)
+        }
+    }
+
+    /// The host refused the active Hermes server's saved username or password at the
+    /// login step (`HermesConnections.onSignInRejected`), including the one silent
+    /// re-login a signed-in 401 starts. Shows that server's sign-in form, where no Bot
+    /// screen exists to send the refused password again. Any other server, and a webui
+    /// server's own Hermes connection, which keeps its per-screen flag (#884), stays as it is.
+    func hermesSignInRejected(server: URL) {
+        guard state == .loggedIn(server: server), kind(of: server) == .hermes else { return }
+        lastErrorMessage = BotConnectionAdvice.message(for: BotFailure.rejected(401), address: server)
+        state = .loggedOut(server: server)
+    }
+
+    /// The Hermes connection form saved `server`'s sign-in. Records the release the host
+    /// reported, and signs the server back in when it is the active Hermes server waiting
+    /// on its sign-in form. A no-op for a webui server.
+    func hermesSignInSaved(server: URL) {
+        guard var account = servers.first(where: { $0.id == server.absoluteString }), account.kind == .hermes,
+              let saved = try? BotConnectionStore(keychain: keychain).load(server: server) else { return }
+        if account.serverVersion != saved.hermesVersion {
+            account.serverVersion = saved.hermesVersion
+            serverRegistry.update(account)
+            refreshServers()
+        }
+        if state == .loggedOut(server: server) {
+            lastErrorMessage = nil
+            state = .loggedIn(server: server)
+        }
+    }
+
     /// Updates the in-effect headers from the Settings editor while signed in. The
     /// in-memory snapshot always updates immediately (so live requests pick them
     /// up), but the Keychain write is opt-in: the editor refreshes on every
@@ -294,7 +423,8 @@ final class AuthManager {
     /// Signs out of the **active** server: best-effort server-side logout, then
     /// drops it locally and auto-switches to the next remaining server — returning
     /// to onboarding only when none remain (#17). A single-server install behaves
-    /// exactly as before (sign out → onboarding).
+    /// exactly as before (sign out → onboarding). A Hermes server stays configured: its
+    /// record and Bot data are deleted and its sign-in form shows, with its address (#899).
     func signOut() async {
         guard let active = state.server else {
             // Defensive: nothing is active. Safe full reset to onboarding.
@@ -303,11 +433,23 @@ final class AuthManager {
             return
         }
 
+        if kind(of: active) == .hermes {
+            try? await BotHistoryCache.shared.removeServer(active, activeConnectionID: (try? BotConnectionStore(keychain: keychain).load(server: active))?.id)
+            await ChatDraftStore.shared.discardBotDrafts(server: active)
+            removeBotConnection(for: active)
+            lastErrorMessage = nil
+            state = .loggedOut(server: active)
+            return
+        }
+
         if case .loggedIn = state {
             await attemptBestEffortServerLogout(server: active)
         }
 
+        try? await BotHistoryCache.shared.removeServer(active, activeConnectionID: (try? BotConnectionStore(keychain: keychain).load(server: active))?.id)
+        SessionUnreadStore().remove(for: active)
         await ChatDraftStore.shared.discardBotDrafts(server: active)
+        await PushRegistrar.shared?.forget(for: active)
         advanceAfterRemoving(activeServer: active)
     }
 
@@ -317,11 +459,15 @@ final class AuthManager {
     /// headers, and cookies — leaving the active server's auth untouched (#17).
     func removeServer(_ account: ServerAccount) async {
         guard let serverURL = URL(string: account.urlString) else { return }
+        try? await BotHistoryCache.shared.removeServer(serverURL, activeConnectionID: (try? BotConnectionStore(keychain: keychain).load(server: serverURL))?.id)
+        SessionUnreadStore().remove(for: serverURL)
         await ChatDraftStore.shared.discardBotDrafts(server: serverURL)
+        // A Hermes server has no push pairing until #706, so the relay is never called for one.
+        if account.kind == .webui { await PushRegistrar.shared?.forget(for: serverURL) }
         let isActive = state.server?.absoluteString == account.id
 
         if isActive {
-            if case .loggedIn = state {
+            if case .loggedIn = state, account.kind == .webui {
                 await attemptBestEffortServerLogout(server: serverURL)
             }
             advanceAfterRemoving(activeServer: serverURL)
@@ -333,9 +479,9 @@ final class AuthManager {
     }
 
     /// Switches the active server to an already-registered one (the Settings
-    /// switcher). Mirrors the cold-launch path: persist the URL, set it active,
-    /// hydrate its scoped headers, and optimistically enter `.loggedIn`. A stale
-    /// cookie is demoted to `.loggedOut` by the first request's 401
+    /// switcher). Mirrors the cold-launch path: persist the URL, set it active, and
+    /// enter it (`enterActiveServer`): a webui server optimistically `.loggedIn` with
+    /// its scoped headers, a stale cookie demoted by the first request's 401
     /// (`handleAPIError`), exactly like a relaunch — so no extra round-trip here.
     func switchActiveServer(to account: ServerAccount) {
         guard account.id != state.server?.absoluteString,
@@ -344,13 +490,12 @@ final class AuthManager {
         serverRegistry.setActive(id: account.id)
         refreshServers()
         try? keychain.save(serverURL.absoluteString, forKey: .serverURL)
-        hydrateCustomHeaders(for: serverURL)
         // Drop the App Intents profile picker cache (#339): it holds the previous server's
         // profiles, which would leak into Shortcuts / Siri if the new server's fetch is
         // delayed or fails. The new server's profiles reload on the next foreground fetch.
         ProfileEntityCache.shared.save([])
         lastErrorMessage = nil
-        state = .loggedIn(server: serverURL)
+        enterActiveServer(serverURL)
     }
 
     /// Updates a server's per-server identity (display name, initials, Header Logo
@@ -388,9 +533,8 @@ final class AuthManager {
 
         if let nextActive, let nextURL = URL(string: nextActive.urlString) {
             try? keychain.save(nextURL.absoluteString, forKey: .serverURL)
-            hydrateCustomHeaders(for: nextURL)
             lastErrorMessage = nil
-            state = .loggedIn(server: nextURL)
+            enterActiveServer(nextURL)
         } else {
             try? keychain.delete(.serverURL)
             headerStore.replace(with: [])
@@ -399,15 +543,28 @@ final class AuthManager {
     }
 
     /// Deletes one server's local auth artifacts — its scoped custom headers, its
-    /// Bot connection with that connection's cached avatars, and its cookies —
-    /// without touching the registry or the global `server_url` key.
+    /// Bot connection with that connection's cached avatars, shared sign-in and remembered
+    /// Hermes Profile, and its cookies — without touching the registry or the global
+    /// `server_url` key. Its push pairing lives in the shared Keychain access group and is torn down by
+    /// `PushRegistrar.forget`, which the removal paths above await first. A Hermes
+    /// server's sign-in never uses the shared cookie jar, so the cookies of a webui
+    /// server on the same host stay.
     private func clearLocalArtifacts(for server: URL) {
         try? keychain.delete(.customHeaders, scope: server.absoluteString)
-        if let connection = try? BotConnectionStore(keychain: keychain).load(server: server) {
+        removeBotConnection(for: server)
+        if kind(of: server) == .webui { clearSessionCookies(for: server) }
+    }
+
+    /// Deletes `server`'s Bot connection record with that connection's cached avatars,
+    /// which also retires its shared sign-in (`BotConnectionStore.remove`), and the Profile
+    /// its New Session remembers (#1015).
+    private func removeBotConnection(for server: URL) {
+        HermesProfilePreference.save(nil, for: server, in: preferences)
+        let bots = BotConnectionStore(keychain: keychain)
+        if let connection = try? bots.load(server: server) {
             BotAvatarStore.shared.removeAll(connectionID: connection.id)
         }
-        try? keychain.delete(.botConnection, scope: server.absoluteString)
-        clearSessionCookies(for: server)
+        try? bots.remove(server: server)
     }
 
     /// Tells the server to end the session, but never lets an unreachable or
@@ -439,6 +596,9 @@ final class AuthManager {
         guard case APIError.unauthorized = error else {
             return
         }
+        // A webui 401 is never about a Hermes server's own sign-in: a late reply from a
+        // webui screen a switch left behind must not sign the Hermes server out (#899).
+        if let server = state.server, kind(of: server) == .hermes { return }
 
         lastErrorMessage = String(localized: "Your session expired. Sign in again.")
 
@@ -556,11 +716,25 @@ final class AuthManager {
         // re-activated, and its per-server identity is only seeded on first
         // insert, so #17 edits survive relaunch.
         serverRegistry.activate(url: savedURL)
-        // Hydrate this server's headers (migrating the pre-#16 global blob on the
-        // first launch after the split) before any client is built, so the first
-        // request after launch carries the saved headers (#255/#16).
-        hydrateCustomHeaders(for: savedURL)
-        state = .loggedIn(server: savedURL)
+        refreshServers()
+        enterActiveServer(savedURL)
+    }
+
+    /// Enters `server`, already active in the registry. A webui server's headers are
+    /// hydrated (migrating the pre-#16 global blob on the first launch after the split)
+    /// before any client is built, so its first request carries them (#255/#16), and it
+    /// enters `.loggedIn` optimistically: a stale cookie is demoted by the first 401
+    /// (`handleAPIError`). A Hermes server sends no webui headers and is signed in only
+    /// while its own record exists; without one its sign-in form shows (#899).
+    private func enterActiveServer(_ server: URL) {
+        guard kind(of: server) == .hermes else {
+            hydrateCustomHeaders(for: server)
+            state = .loggedIn(server: server)
+            return
+        }
+        headerStore.replace(with: [])
+        let saved = try? BotConnectionStore(keychain: keychain).load(server: server)
+        state = saved == nil ? .loggedOut(server: server) : .loggedIn(server: server)
     }
 
     nonisolated static func normalizedServerURL(from rawValue: String) throws -> URL {

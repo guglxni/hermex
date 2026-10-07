@@ -2,12 +2,30 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// The card editor's height, shared by the Sessions, Bot Chat and Bot room
+/// composers. It grows with the text from `expandedMinimum` up to the text
+/// view's 160 pt measure cap. In compact height (iPhone landscape) it stays at
+/// the minimum and scrolls inside, so with the keyboard up the transcript stays
+/// visible. A nil size class counts as regular.
+enum ComposerTextInputHeight {
+    /// At least 72 pt of real text view, so a tap anywhere in the card lands
+    /// on the editor rather than dead space; about three lines at default size.
+    static let expandedMinimum: CGFloat = 72
+
+    static func expanded(measured: CGFloat, verticalSizeClass: UserInterfaceSizeClass?) -> CGFloat {
+        verticalSizeClass == .compact ? expandedMinimum : max(expandedMinimum, measured)
+    }
+}
+
 struct ComposerTextInputView: View {
     @Binding var text: String
     @Binding var selection: ComposerSelection
     @Binding var isFocused: Bool
     @Binding var inputHeight: CGFloat
     @Binding var measuredHeight: CGFloat
+
+    /// Compact in iPhone landscape, where the card editor stops growing.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     /// The chips the editor has drawn. The collapsed pill draws this same set
     /// rather than deriving its own, because a trailing chip whose space was
@@ -27,6 +45,7 @@ struct ComposerTextInputView: View {
     /// The workspace files picked in this chat, whose `@path` references the
     /// editor draws as chips.
     let chipFilePaths: Set<String>
+    var chipBots: [String: ComposerBotReference] = [:]
     let quotes: [ComposerQuote]
     let onKeyboardSend: () -> Void
     let onPasteFileProviders: ([NSItemProvider]) -> Void
@@ -37,12 +56,14 @@ struct ComposerTextInputView: View {
     let onTapChip: (ComposerChipToken) -> Void
     let onTapQuote: (ComposerQuote) -> Void
     let onRemoveQuote: (UUID) -> Void
+    /// The chat's last sent message, for ↑ in an empty editor. Nil turns the
+    /// shortcut off.
+    var recallLastSentText: (() -> String?)? = nil
 
     var placeholder = String(localized: "Ask anything... /commands")
     /// Text-only clients reject file/image paste and drop before invoking callbacks.
     var acceptsAttachments = true
     private let collapsedLineHeight: CGFloat = 22
-    private let expandedMinimumHeight: CGFloat = 72
 
     var body: some View {
         ZStack(alignment: isCollapsed ? .leading : .topLeading) {
@@ -54,12 +75,14 @@ struct ComposerTextInputView: View {
                 isKeyboardSendEnabled: isKeyboardSendEnabled,
                 chipSkills: chipSkills,
                 chipFilePaths: chipFilePaths,
+                chipBots: chipBots,
                 quotes: quotes,
                 renderedChips: $renderedChips,
                 onTapChip: onTapChip,
                 onTapQuote: onTapQuote,
                 onRemoveQuote: onRemoveQuote,
                 onKeyboardSend: onKeyboardSend,
+                recallLastSentText: recallLastSentText,
                 onHeightChange: updateMeasuredHeight,
                 onPasteFileProviders: onPasteFileProviders,
                 onPasteFileURLs: onPasteFileURLs,
@@ -68,9 +91,11 @@ struct ComposerTextInputView: View {
                 acceptsAttachments: acceptsAttachments,
                 accessibilityLabel: placeholder
             )
-            // The card editor is at least 72 pt of real text view, so a tap
-            // anywhere in it lands on the editor rather than dead space.
-            .frame(height: isCollapsed ? collapsedLineHeight : max(expandedMinimumHeight, inputHeight))
+            // The card editor runs 72–160 pt with the text, and stays at 72 pt
+            // in iPhone landscape, where the text scrolls inside it.
+            .frame(height: isCollapsed
+                ? collapsedLineHeight
+                : ComposerTextInputHeight.expanded(measured: inputHeight, verticalSizeClass: verticalSizeClass))
             .padding(.vertical, isCollapsed ? 0 : verticalPadding)
             .padding(.horizontal, 16)
             .opacity(isCollapsed ? 0 : 1)
@@ -177,12 +202,14 @@ private struct ComposerTextView: UIViewRepresentable {
     let isKeyboardSendEnabled: Bool
     let chipSkills: [SkillSlashSuggestion]
     let chipFilePaths: Set<String>
+    let chipBots: [String: ComposerBotReference]
     let quotes: [ComposerQuote]
     @Binding var renderedChips: [ComposerChipToken]
     let onTapChip: (ComposerChipToken) -> Void
     let onTapQuote: (ComposerQuote) -> Void
     let onRemoveQuote: (UUID) -> Void
     let onKeyboardSend: () -> Void
+    let recallLastSentText: (() -> String?)?
     let onHeightChange: (CGFloat) -> Void
     let onPasteFileProviders: ([NSItemProvider]) -> Void
     let onPasteFileURLs: ([URL]) -> Void
@@ -206,6 +233,7 @@ private struct ComposerTextView: UIViewRepresentable {
         let textView = ComposerChipTextView()
         textView.delegate = context.coordinator
         textView.textDropDelegate = context.coordinator
+        textView.wantsDeferredFocus = { [weak coordinator = context.coordinator] in coordinator?.isFocused == true }
         textView.backgroundColor = .clear
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
@@ -219,6 +247,7 @@ private struct ComposerTextView: UIViewRepresentable {
         textView.allowsEditingTextAttributes = false
         textView.isKeyboardSendEnabled = isKeyboardSendEnabled
         textView.onKeyboardSend = onKeyboardSend
+        textView.recallLastSentText = recallLastSentText
         textView.onPasteFileProviders = onPasteFileProviders
         textView.onPasteFileURLs = onPasteFileURLs
         textView.onPasteImageProviders = onPasteImageProviders
@@ -238,8 +267,7 @@ private struct ComposerTextView: UIViewRepresentable {
         // trailing edge. `.natural` keeps the LTR default untouched, and per-run
         // bidi still resolves mixed Arabic+Latin/URL content within the line.
         let isRTL = context.environment.layoutDirection == .rightToLeft
-        textView.semanticContentAttribute = isRTL ? .forceRightToLeft : .unspecified
-        textView.textAlignment = isRTL ? .right : .natural
+        textView.applyPresentationStyle(isRightToLeft: isRTL, isDisabled: isDisabled)
         textView.acceptsAttachments = acceptsAttachments
         textView.accessibilityLabel = accessibilityLabel
         let pasteTypes = acceptsAttachments
@@ -249,11 +277,10 @@ private struct ComposerTextView: UIViewRepresentable {
             textView.pasteConfiguration = UIPasteConfiguration(acceptableTypeIdentifiers: pasteTypes)
         }
         context.coordinator.acceptsAttachments = acceptsAttachments
-        textView.isEditable = !isDisabled
-        textView.isSelectable = !isDisabled
-        textView.textColor = isDisabled ? .secondaryLabel : .label
+        context.coordinator.syncEditing(for: textView, isDisabled: isDisabled)
         textView.isKeyboardSendEnabled = isKeyboardSendEnabled
         textView.onKeyboardSend = onKeyboardSend
+        textView.recallLastSentText = recallLastSentText
         textView.onPasteFileProviders = onPasteFileProviders
         textView.onPasteFileURLs = onPasteFileURLs
         textView.onPasteImageProviders = onPasteImageProviders
@@ -264,6 +291,7 @@ private struct ComposerTextView: UIViewRepresentable {
         textView.quotes = quotes
         textView.chipSkills = chipSkills
         textView.chipFilePaths = chipFilePaths
+        textView.chipBots = chipBots
         context.coordinator.onDropFileProviders = onPasteFileProviders
         context.coordinator.onDropImageProviders = onPasteImageProviders
         context.coordinator.applyBoundText(text, generation: selection.publishGeneration, to: textView)
@@ -287,6 +315,7 @@ private struct ComposerTextView: UIViewRepresentable {
         var onDropFileProviders: ([NSItemProvider]) -> Void = { _ in }
         var onDropImageProviders: ([NSItemProvider]) -> Void = { _ in }
         private var pendingFocusTarget: Bool?
+        private var pendingEditingTarget: Bool?
         /// Set while we push a bound value into the editor, so the delegate
         /// callbacks it provokes do not write the bindings back mid-update.
         private var isApplyingBoundValue = false
@@ -443,7 +472,27 @@ private struct ComposerTextView: UIViewRepresentable {
             isApplyingBoundValue = wasApplying
         }
 
-        func syncFocus(for textView: UITextView, shouldFocus: Bool, isDisabled: Bool) {
+        /// Disabling a focused UITextView can synchronously ask its SwiftUI
+        /// hosting view for the next responder. Do that after updateUIView has
+        /// returned, otherwise the responder lookup re-enters the active graph.
+        func syncEditing(for textView: UITextView, isDisabled: Bool) {
+            let editable = !isDisabled
+            guard textView.isEditable != editable || textView.isSelectable != editable else {
+                pendingEditingTarget = nil
+                return
+            }
+            guard pendingEditingTarget != editable else { return }
+            pendingEditingTarget = editable
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, self.pendingEditingTarget == editable else { return }
+                self.pendingEditingTarget = nil
+                if !editable, textView.isFirstResponder { textView.resignFirstResponder() }
+                textView.isEditable = editable
+                textView.isSelectable = editable
+            }
+        }
+
+        func syncFocus(for textView: ComposerChipTextView, shouldFocus: Bool, isDisabled: Bool) {
             if isDisabled, isFocused {
                 Task { @MainActor [weak self] in
                     self?.isFocused = false
@@ -451,6 +500,7 @@ private struct ComposerTextView: UIViewRepresentable {
             }
 
             let target = shouldFocus && !isDisabled
+            if !target { textView.cancelDeferredFocus() }
             guard textView.isFirstResponder != target else {
                 pendingFocusTarget = nil
                 return
@@ -471,7 +521,10 @@ private struct ComposerTextView: UIViewRepresentable {
                 if target {
                     guard self.isFocused, textView.isEditable, textView.window != nil else { return }
                     textView.becomeFirstResponder()
-                } else if textView.isFirstResponder {
+                } else if !self.isFocused, textView.isFirstResponder {
+                    // UIKit can begin a new editing session while this blur is
+                    // queued. Recheck the binding, just as the focus path does,
+                    // so an older request cannot dismiss the new session.
                     textView.resignFirstResponder()
                 }
             }
@@ -484,6 +537,9 @@ private struct ComposerTextView: UIViewRepresentable {
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
+            if let editor = textView as? ComposerChipTextView, editor.isInNavigationTransition {
+                return
+            }
             if isFocused {
                 isFocused = false
             }

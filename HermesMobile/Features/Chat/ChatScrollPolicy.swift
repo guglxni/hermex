@@ -157,6 +157,11 @@ enum ChatScrollPolicy {
         return latch
     }
 
+    /// Proximity, not the follow latch, hides the arrow at the bottom.
+    static func showsScrollToBottomButton(isNearBottom: Bool, isStreaming: Bool, isFollowing: Bool) -> Bool {
+        !isNearBottom && (!isStreaming || !isFollowing)
+    }
+
     static func isAtBottom(distanceFromBottom: CGFloat) -> Bool {
         distanceFromBottom <= followReArmThreshold
     }
@@ -173,22 +178,193 @@ enum ChatScrollPolicy {
 /// Transcript disclosure controls (reasoning blocks, tool cards, tool groups,
 /// turn folds) call this right before they toggle so the transcript can pin
 /// the reader's offset and suspend follow scrolls through the size change.
+///
+/// A reference, not a closure: SwiftUI cannot compare closures, so a closure
+/// rebuilt on each transcript pass (every stream tick and keystroke) would
+/// invalidate every reader. `chatDisclosureToggled(perform:)` keeps one
+/// instance and refreshes `handler` in place, which nothing observes, so
+/// readers see the same value on every pass.
+final class ChatDisclosureToggleAction {
+    var handler: () -> Void = {}
+
+    func callAsFunction() { handler() }
+}
+
 struct ChatDisclosureToggledKey: EnvironmentKey {
-    static let defaultValue: () -> Void = {}
+    static let defaultValue = ChatDisclosureToggleAction()
 }
 
 extension EnvironmentValues {
-    var chatDisclosureToggled: () -> Void {
+    var chatDisclosureToggled: ChatDisclosureToggleAction {
         get { self[ChatDisclosureToggledKey.self] }
         set { self[ChatDisclosureToggledKey.self] = newValue }
     }
 }
 
+/// Routes link taps through one `OpenURLAction` that outlives body passes, for
+/// the same reason as `ChatDisclosureToggleAction`. The screen's `handler` sees
+/// each link first and returns nil for links it does not own; of those, web
+/// pages open in the in-app browser and the rest go to the system.
+final class TranscriptLinkRouter {
+    enum Decision {
+        case host(OpenURLAction.Result)
+        case inAppBrowser
+        case system
+    }
+
+    var handler: (URL) -> OpenURLAction.Result? = { _ in nil }
+    var openInAppBrowser: (URL) -> Void = { url in
+        MainActor.assumeIsolated { SafariView.present(url) }
+    }
+
+    private(set) lazy var openURL = OpenURLAction { [weak self] url in
+        self?.route(url) ?? .systemAction
+    }
+
+    /// What a tap on `url` does, given the screen handler's result for it.
+    static func decision(for url: URL, hostResult: OpenURLAction.Result?) -> Decision {
+        if let hostResult { return .host(hostResult) }
+        return InAppBrowserPolicy.opensInApp(url) ? .inAppBrowser : .system
+    }
+
+    private func route(_ url: URL) -> OpenURLAction.Result {
+        switch Self.decision(for: url, hostResult: handler(url)) {
+        case .host(let result):
+            return result
+        case .inAppBrowser:
+            openInAppBrowser(url)
+            return .handled
+        case .system:
+            return .systemAction
+        }
+    }
+}
+
+extension View {
+    /// Publishes `handler` to the transcript's disclosure controls without
+    /// invalidating them when the caller rebuilds the closure.
+    func chatDisclosureToggled(perform handler: @escaping () -> Void) -> some View {
+        modifier(ChatDisclosureToggledModifier(handler: handler))
+    }
+
+    /// Routes every link tap below this view through `handler` first, without
+    /// invalidating link readers when the caller rebuilds the closure. Links
+    /// the handler returns nil for open web pages in an in-app Safari sheet
+    /// over whatever is on screen (`SafariView`); other links go to the system.
+    func transcriptLinks(perform handler: @escaping (URL) -> OpenURLAction.Result?) -> some View {
+        modifier(TranscriptLinksModifier())
+            .modifier(TranscriptLinkHandlerModifier(handler: handler))
+    }
+
+    /// `transcriptLinks(perform:)` for a screen with no links of its own.
+    func transcriptLinks() -> some View {
+        transcriptLinks { _ in nil }
+    }
+}
+
+// The stable instances live in these modifiers' own state, not the caller's.
+// Handlers usually capture the calling view, whose state would otherwise hold
+// the instance that holds the handler: a cycle that outlives the screen.
+
+private struct ChatDisclosureToggledModifier: ViewModifier {
+    let handler: () -> Void
+    @State private var action = ChatDisclosureToggleAction()
+
+    func body(content: Content) -> some View {
+        action.handler = handler
+        return content.environment(\.chatDisclosureToggled, action)
+    }
+}
+
+/// Owns the router and refreshes its handler on every pass, publishing only the
+/// router itself: a reference that compares equal, as with `chatDisclosureToggled`.
+private struct TranscriptLinkHandlerModifier: ViewModifier {
+    let handler: (URL) -> OpenURLAction.Result?
+    @State private var router = TranscriptLinkRouter()
+
+    func body(content: Content) -> some View {
+        router.handler = handler
+        return content.environment(\.transcriptLinkRouter, router)
+    }
+}
+
+/// Publishes the enclosing router's `openURL`. It takes no inputs and its one
+/// dependency never changes, so owner passes skip its body and `openURL` is
+/// written once: re-written on every pass, iOS 26 could treat it as changed
+/// and re-run every link reader (ChatTranscriptEnvironmentStabilityTests).
+private struct TranscriptLinksModifier: ViewModifier {
+    @Environment(\.transcriptLinkRouter) private var router
+
+    func body(content: Content) -> some View {
+        content.environment(\.openURL, router?.openURL ?? OpenURLAction { _ in .systemAction })
+    }
+}
+
+private struct TranscriptLinkRouterKey: EnvironmentKey {
+    static let defaultValue: TranscriptLinkRouter? = nil
+}
+
+private extension EnvironmentValues {
+    var transcriptLinkRouter: TranscriptLinkRouter? {
+        get { self[TranscriptLinkRouterKey.self] }
+        set { self[TranscriptLinkRouterKey.self] = newValue }
+    }
+}
+
 /// Keeps transcript reconciliation and other state-heavy startup work out of
 /// the system navigation transition. Cache preparation remains synchronous so
-/// an available transcript can participate in the destination's first layout.
+/// an available transcript can participate in the destination's first layout,
+/// and the transcript request is sent then too; only applying it waits.
 enum ChatInitialAppearancePolicy {
     static func shouldBeginAsyncWork(hasCompletedAppearance: Bool) -> Bool {
         hasCompletedAppearance
+    }
+}
+
+/// A run keeps reader ownership even after an explicit latest/send re-arms follow.
+/// Only an owned successful completion can consume this one-shot permission.
+struct ChatCompletionScrollPolicy {
+    /// Use the final visible row of the current turn, never an older reply or
+    /// an interim bubble. Render identity remains stable through hydration.
+    static func finalResponseRenderID(
+        in messages: [TranscriptMessage], terminalReplyRenderIDs: Set<String>
+    ) -> String? {
+        let lastUserIndex = messages.last(where: {
+            $0.message.role == "user" && !$0.message.isSteerMessage
+        })?.loadedIndex ?? -1
+        return messages.last(where: {
+            $0.loadedIndex > lastUserIndex && $0.message.role == "assistant"
+                && terminalReplyRenderIDs.contains($0.renderID)
+        })?.renderID
+    }
+
+    private var streamID: String?
+    private var readerTookOwnership = false
+    private var consumed = false
+
+    mutating func begin(streamID: String, isFollowing: Bool) {
+        guard self.streamID != streamID else { return }
+        self.streamID = streamID
+        readerTookOwnership = !isFollowing
+        consumed = false
+    }
+
+    mutating func observe(_ event: ChatScrollPolicy.FollowEvent) {
+        switch event {
+        case .userScrollBegin:
+            readerTookOwnership = true
+        case .contentScrolled(_, let isUserScrolling, let movedAway, _):
+            if isUserScrolling || movedAway { readerTookOwnership = true }
+        default:
+            break
+        }
+    }
+
+    mutating func readerDidInteract() { readerTookOwnership = true }
+
+    mutating func consumeCompletion(streamID: String, enabled: Bool, sceneIsActive: Bool = true) -> Bool {
+        guard sceneIsActive, self.streamID == streamID, !consumed else { return false }
+        consumed = true
+        return enabled && !readerTookOwnership
     }
 }

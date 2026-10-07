@@ -19,8 +19,18 @@ final class ChatHapticsTests: XCTestCase {
         ChatHaptics.copied(isEnabled: false) { feedback.append($0) }
         ChatHaptics.gitActionFinished(succeeded: true, isEnabled: false) { feedback.append($0) }
         ChatHaptics.streamingPulse(isEnabled: false) { feedback.append($0) }
+        ChatHaptics.autocompleteAccepted(isEnabled: false) { feedback.append($0) }
 
         XCTAssertTrue(feedback.isEmpty)
+    }
+
+    @MainActor
+    func testAutocompleteAcceptedPlaysOneSelectionTick() {
+        var feedback: [ChatHapticFeedback] = []
+
+        ChatHaptics.autocompleteAccepted(isEnabled: true) { feedback.append($0) }
+
+        XCTAssertEqual(feedback, [.selection])
     }
 
     @MainActor
@@ -64,6 +74,16 @@ final class ChatHapticsTests: XCTestCase {
             .warning,
             .selection
         ])
+    }
+
+    @MainActor
+    func testBotFeedbackPlaysTheMatchingSessionsHaptic() {
+        var feedback: [ChatHapticFeedback] = []
+        let events: [BotFeedback.Event] = [.sent, .approved(.once), .approved(.deny), .answered, .stopped, .turnCompleted]
+        for event in events { ChatHaptics.botFeedback(event, isEnabled: true) { feedback.append($0) } }
+        ChatHaptics.botFeedback(.sent, isEnabled: false) { feedback.append($0) }
+
+        XCTAssertEqual(feedback, [.lightImpact, .lightImpact, .warning, .selection, .mediumImpact, .success])
     }
 
     func testStreamingPulseThrottleAllowsOneTickPerInterval() {

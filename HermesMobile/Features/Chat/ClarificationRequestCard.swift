@@ -8,6 +8,9 @@ import UIKit
 /// the transcript. A new request always arrives expanded.
 struct ClarificationRequestInset: View {
     let prompt: ClarificationPromptState
+    /// Height between the chat's top safe edge and this inset's bottom edge.
+    /// The expanded card may use less, but never more.
+    let maximumExpandedHeight: CGFloat
     let isResponding: Bool
     let isStopping: Bool
     let errorMessage: String?
@@ -26,7 +29,7 @@ struct ClarificationRequestInset: View {
 
     var body: some View {
         ClarificationRequestBar(
-            prompt: prompt,
+            summary: ClarificationRequestBar.summary(for: prompt.question),
             isStopping: isStopping,
             onExpand: { setExpanded(true) },
             onStop: onStop
@@ -46,11 +49,14 @@ struct ClarificationRequestInset: View {
                 if isExpanded {
                     ClarificationRequestCard(
                         prompt: prompt,
+                        maximumExpandedHeight: maximumExpandedHeight,
                         isResponding: isResponding,
                         errorMessage: errorMessage,
                         draftResponse: $draftResponse,
                         onSubmit: onSubmit,
-                        onCollapse: { setExpanded(false) }
+                        onCollapse: { setExpanded(false) },
+                        onDismissKeyboard: onDismissKeyboard,
+                        onCannotFit: { setExpanded(false) }
                     )
                     .transition(.move(edge: .bottom))
                 }
@@ -84,7 +90,8 @@ struct ClarificationRequestInset: View {
 /// One-line footprint of a pending clarification: what is being asked, a way
 /// back into the card, and Stop for when the run should end instead.
 struct ClarificationRequestBar: View {
-    let prompt: ClarificationPromptState
+    /// One line of what is asked (`summary(for:)`).
+    let summary: String
     let isStopping: Bool
     let onExpand: () -> Void
     let onStop: () -> Void
@@ -115,7 +122,7 @@ struct ClarificationRequestBar: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
 
-                        Text(Self.summary(for: prompt.question))
+                        Text(summary)
                             .font(.subheadline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
@@ -132,7 +139,7 @@ struct ClarificationRequestBar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Expand clarification")
-            .accessibilityValue(Self.summary(for: prompt.question))
+            .accessibilityValue(summary)
 
             Button(action: onStop) {
                 Image(systemName: "stop.fill")
@@ -150,37 +157,47 @@ struct ClarificationRequestBar: View {
         .padding(.trailing, 8)
         .padding(.vertical, 8)
         .frame(maxWidth: 560)
-        .clarificationSurface(cornerRadius: ChatComposerMetrics.cardCornerRadius)
+        .pendingRequestCardSurface(cornerRadius: ChatComposerMetrics.cardCornerRadius)
         .accessibilityElement(children: .contain)
     }
 }
 
 struct ClarificationRequestCard: View {
     let prompt: ClarificationPromptState
+    let maximumExpandedHeight: CGFloat
     let isResponding: Bool
     let errorMessage: String?
     @Binding var draftResponse: String
     let onSubmit: (String) -> Void
     let onCollapse: () -> Void
+    let onDismissKeyboard: () -> Void
+    let onCannotFit: () -> Void
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    @ScaledMetric(relativeTo: .body) private var submitButtonSize: CGFloat = 40
     @ScaledMetric(relativeTo: .body) private var collapseButtonSize: CGFloat = 28
+    @ScaledMetric(relativeTo: .body) private var minimumBodyHeight: CGFloat = 44
+    @State private var headerHeight: CGFloat?
+    @State private var responseHeight: CGFloat?
+    @State private var footerHeight: CGFloat?
     @State private var bodyContentHeight: CGFloat?
-
-    /// Beyond this the question and choices scroll inside the card, so a long
-    /// prompt cannot push the response field off screen. Sized to fit a short
-    /// question with four choices without scrolling.
-    private let bodyHeightCap: CGFloat = 300
-
+    private let contentSpacing: CGFloat = 14
+    private let verticalPadding: CGFloat = 32
     var body: some View {
         cardContent
             .frame(maxWidth: 560, alignment: .leading)
-            .clarificationSurface(cornerRadius: ChatComposerMetrics.cardCornerRadius)
-            // Ideal height regardless of what the bar-sized overlay proposes.
+            .pendingRequestCardSurface(cornerRadius: ChatComposerMetrics.cardCornerRadius)
+            // Honor the clamped ideal height; hide only until base measurements settle.
             .fixedSize(horizontal: false, vertical: true)
+            .opacity(hasMeasuredBaseContent ? 1 : 0)
+            .allowsHitTesting(hasMeasuredBaseContent && canFit != false)
             .accessibilityElement(children: .contain)
+            .onChange(of: canFit, initial: true) { _, canFit in
+                if canFit == false {
+                    onCannotFit()
+                }
+            }
     }
 
     private var header: some View {
@@ -207,6 +224,15 @@ struct ClarificationRequestCard: View {
 
             collapseButton
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onDismissKeyboard)
+        .accessibilityElement(children: .contain)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            headerHeight = height
+        }
     }
 
     private var collapseButton: some View {
@@ -227,13 +253,7 @@ struct ClarificationRequestCard: View {
             .font(.subheadline)
             .foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(questionBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(.primary.opacity(0.06), lineWidth: 1)
-            )
+            .pendingRequestBlockSurface()
     }
 
     private var choicesList: some View {
@@ -244,8 +264,7 @@ struct ClarificationRequestCard: View {
         }
     }
 
-    /// Question plus choices, scrolling only once they outgrow the cap.
-    @ViewBuilder
+    /// Only the question and choices scroll; a drag dismisses the keyboard interactively.
     private var scrollableBody: some View {
         let content = VStack(alignment: .leading, spacing: 14) {
             question
@@ -260,14 +279,11 @@ struct ClarificationRequestCard: View {
             bodyContentHeight = height
         }
 
-        if let bodyContentHeight, bodyContentHeight > bodyHeightCap {
-            ScrollView {
-                content
-            }
-            .frame(height: bodyHeightCap)
-        } else {
+        return ScrollView {
             content
         }
+        .scrollDismissesKeyboard(.interactively)
+        .frame(height: resolvedBodyHeight ?? minimumBodyHeight)
     }
 
     private var responseField: some View {
@@ -275,27 +291,22 @@ struct ClarificationRequestCard: View {
             TextField("Type a response", text: $draftResponse, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(2...5)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .tint(actionButtonBackground)
-                .background(textFieldBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(textFieldBorder)
+                .tint(PendingRequestSubmitButton.fill(canSubmit: canSubmit, colorScheme: colorScheme))
+                .pendingRequestFieldSurface()
                 .disabled(isResponding)
 
-            Button {
-                submitDraft()
-            } label: {
-                submitButtonLabel
-                    .frame(width: submitButtonSize, height: submitButtonSize)
-                    .background(actionButtonBackground)
-                    .foregroundStyle(actionButtonForeground)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.chatTactile(.icon))
-            .disabled(isResponding || trimmedDraft.isEmpty)
-            .accessibilityLabel("Submit clarification")
+            PendingRequestSubmitButton(isBusy: isResponding, canSubmit: canSubmit, action: submitDraft)
+                .accessibilityLabel("Submit clarification")
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            responseHeight = height
         }
     }
+
+    private var canSubmit: Bool { !isResponding && !trimmedDraft.isEmpty }
 
     @ViewBuilder
     private var footer: some View {
@@ -304,6 +315,11 @@ struct ClarificationRequestCard: View {
                 .font(.caption)
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    footerHeight = height
+                }
         }
     }
 
@@ -318,26 +334,28 @@ struct ClarificationRequestCard: View {
 
     private func expirationBadge(now: Date) -> some View {
         let remaining = remainingSeconds(now: now)
-        let fraction = remainingFraction(now: now)
 
         return VStack(alignment: .trailing, spacing: 5) {
             Text(expirationText(remaining: remaining))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(.primary.opacity(0.10))
-                    Capsule()
-                        .fill(progressFill)
-                        .frame(width: max(0, proxy.size.width * fraction))
+            if !reduceMotion {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(.primary.opacity(0.10))
+                        Capsule()
+                            .fill(progressFill)
+                            .frame(width: max(0, proxy.size.width * remainingFraction(now: now)))
+                    }
                 }
+                .frame(width: 68, height: 4)
             }
-            .frame(width: 68, height: 4)
-            .accessibilityLabel("Clarification expiration")
-            .accessibilityValue(expirationText(remaining: remaining))
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Clarification expiration")
+        .accessibilityValue(expirationText(remaining: remaining))
     }
 
     private var trimmedDraft: String {
@@ -354,16 +372,35 @@ struct ClarificationRequestCard: View {
         .padding(16)
     }
 
-    @ViewBuilder
-    private var submitButtonLabel: some View {
-        if isResponding {
-            ProgressView()
-                .tint(actionButtonForeground)
-                .scaleEffect(0.82)
-        } else {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 15, weight: .semibold))
-        }
+    private var canFit: Bool? {
+        guard measurements != nil else { return nil }
+        return resolvedBodyHeight != nil
+    }
+
+    private var hasMeasuredBaseContent: Bool { headerHeight != nil && responseHeight != nil && bodyContentHeight != nil }
+
+    private var resolvedBodyHeight: CGFloat? {
+        guard let measurements else { return nil }
+        return ClarificationRequestHeightPolicy.bodyHeight(
+            maximumExpandedHeight: maximumExpandedHeight,
+            fixedContentHeight: measurements.fixedContentHeight,
+            bodyContentHeight: measurements.bodyContentHeight,
+            minimumBodyHeight: minimumBodyHeight
+        )
+    }
+
+    private var measurements: (fixedContentHeight: CGFloat, bodyContentHeight: CGFloat)? {
+        guard let headerHeight, let responseHeight, let bodyContentHeight else { return nil }
+        let hasFooter = nonEmpty(errorMessage) != nil
+        guard !hasFooter || footerHeight != nil else { return nil }
+
+        let visibleSectionCount = hasFooter ? 4 : 3
+        let fixedContentHeight = verticalPadding
+            + headerHeight
+            + responseHeight
+            + (hasFooter ? (footerHeight ?? 0) : 0)
+            + CGFloat(visibleSectionCount - 1) * contentSpacing
+        return (fixedContentHeight, bodyContentHeight)
     }
 
     @ViewBuilder
@@ -379,39 +416,10 @@ struct ClarificationRequestCard: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .foregroundStyle(.primary)
-                .choiceButtonSurface(reduceTransparency: reduceTransparency)
+                .pendingRequestChoiceSurface(reduceTransparency: reduceTransparency)
         }
         .buttonStyle(.chatTactile(.capsule))
         .disabled(isResponding)
-    }
-
-    private var questionBackground: Color {
-        colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.04)
-    }
-
-    private var textFieldBackground: Color {
-        colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.045)
-    }
-
-    private var textFieldBorder: some View {
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .stroke(.primary.opacity(colorScheme == .dark ? 0.13 : 0.10), lineWidth: 1)
-    }
-
-    private var actionButtonBackground: Color {
-        if isResponding || trimmedDraft.isEmpty {
-            return colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.12)
-        }
-
-        return colorScheme == .dark ? .white : .black
-    }
-
-    private var actionButtonForeground: Color {
-        if isResponding || trimmedDraft.isEmpty {
-            return Color(.secondaryLabel)
-        }
-
-        return colorScheme == .dark ? .black : .white
     }
 
     private var progressFill: Color {
@@ -471,41 +479,152 @@ struct ClarificationRequestCard: View {
     }
 }
 
-private extension View {
-    /// Opaque on purpose: the bar and card float over live transcript text,
-    /// and a translucent surface would render the question on top of whatever
-    /// message happens to sit underneath.
-    func clarificationSurface(cornerRadius: CGFloat) -> some View {
-        background(
-            Color(.secondarySystemBackground),
-            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+/// A Hermes session's question, or sudo or secret prompt, pinned above the composer in the
+/// webui clarification's slot (#1011). The clarification bar is its footprint; the expanded
+/// card is the Bot request card, which already answers each of them: batch questions keyed
+/// by `qid`, masked credential fields, Skip. The card stays mounted while collapsed, so a
+/// half-typed answer survives, and slides through the bar's clip window like the webui card.
+/// Taller than the space above the composer, it scrolls. With no room for even a line of it,
+/// it falls back to the bar like the webui card, and expanding then puts the keyboard away.
+struct HermesRequestInset: View {
+    let request: BotPendingRequest
+    let identity: String
+    /// Height between the chat's top safe edge and this inset's bottom edge.
+    let maximumExpandedHeight: CGFloat
+    let isEnabled: Bool
+    let isAnswering: Bool
+    let isStopping: Bool
+    let isHapticsEnabled: Bool
+    let onAnswer: ([BotQuestionAnswer]) -> Void
+    let onSkip: () -> Void
+    /// Sends a credential prompt's typed value. Empty is the host's skip.
+    let onCredential: (String) -> Void
+    let onStop: () -> Void
+    let onDismissKeyboard: () -> Void
+    /// The bar's height, the only part of this view that takes layout space.
+    let onFootprintChange: (CGFloat) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .body) private var collapseButtonSize: CGFloat = 28
+    @ScaledMetric(relativeTo: .body) private var minimumScrollHeight: CGFloat = 44
+    @State private var isExpanded = true
+    @State private var contentHeight: CGFloat?
+
+    var body: some View {
+        ClarificationRequestBar(
+            summary: summary,
+            isStopping: isStopping,
+            onExpand: {
+                if !canFit { onDismissKeyboard() }
+                setExpanded(true)
+            },
+            onStop: onStop
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(.primary.opacity(0.10), lineWidth: 1)
-        )
+        .accessibilityHidden(isExpanded)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            onFootprintChange(height)
+        }
+        .overlay(alignment: .bottom) {
+            ZStack(alignment: .bottom) {
+                card
+                    .offset(y: isExpanded ? 0 : maximumExpandedHeight)
+                    .allowsHitTesting(isExpanded)
+                    .accessibilityHidden(!isExpanded)
+            }
+            .clipped()
+        }
+        .onChange(of: canFit, initial: true) { _, canFit in
+            if !canFit { setExpanded(false) }
+        }
     }
 
-    @ViewBuilder
-    func choiceButtonSurface(reduceTransparency: Bool) -> some View {
-        if reduceTransparency {
-            background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color(.separator), lineWidth: 1)
+    /// The card's scroll viewport at most: the space under the collapse control.
+    private var availableScrollHeight: CGFloat { maximumExpandedHeight - collapseButtonSize - 8 }
+
+    /// Room for at least a line of the card, as the webui card requires.
+    private var canFit: Bool { availableScrollHeight >= minimumScrollHeight }
+
+    /// The collapse control over the card, and the card, which scrolls once it is taller than
+    /// the space left. Hidden until measured.
+    private var card: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            collapseButton
+            ScrollView {
+                BotPendingRequestCard(
+                    request: request, identity: identity, isEnabled: isEnabled, canStop: false,
+                    isAnswering: isAnswering, resolution: nil,
+                    onApprove: { _ in }, onAnswer: onAnswer, onSkip: onSkip, onCredential: onCredential,
+                    onStop: {}, onConnection: { _ in }
                 )
-        } else if #available(iOS 26.0, *) {
-            // Fixed corner radius (not .capsule): a capsule's radius grows with the
-            // button's height, so on tall multi-line options the curved ends bow
-            // inward and clip the text. A fixed radius keeps the outline clear of
-            // the label at any line count and matches the fallbacks below.
-            glassEffect(.regular.interactive(), in: .rect(cornerRadius: 14))
-        } else {
-            background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(.primary.opacity(0.10), lineWidth: 1)
-                )
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    contentHeight = height
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: max(0, min(contentHeight ?? availableScrollHeight, availableScrollHeight)))
         }
+        .frame(maxWidth: 560)
+        .opacity(contentHeight == nil ? 0 : 1)
+    }
+
+    private var collapseButton: some View {
+        Button { setExpanded(false) } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: collapseButtonSize, height: collapseButtonSize)
+                .background(.regularMaterial, in: Circle())
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.chatTactile(.icon))
+        .accessibilityLabel("Collapse clarification")
+    }
+
+    /// What the bar says is asked: the first question, or the credential prompt's title.
+    private var summary: String {
+        switch request {
+        case .question(let question): return ClarificationRequestBar.summary(for: question.questions.first?.prompt ?? "")
+        case .credential(let credential): return credential.title
+        case .approval, .desktopTask, .connection: return ""
+        }
+    }
+
+    private func setExpanded(_ expanded: Bool) {
+        guard expanded != isExpanded else { return }
+        if !expanded {
+            onDismissKeyboard()
+        }
+        ChatHaptics.disclosureToggled(isEnabled: isHapticsEnabled)
+        withAnimation(ChatMotion.clarificationToggle(reduceMotion: reduceMotion)) {
+            isExpanded = expanded
+        }
+    }
+}
+
+/// Converts the safe gap into a body viewport, or nil to fall back to the collapsed bar.
+struct ClarificationRequestHeightPolicy {
+    static let bodyHeightCap: CGFloat = 300
+
+    static func bodyHeight(
+        maximumExpandedHeight: CGFloat,
+        fixedContentHeight: CGFloat,
+        bodyContentHeight: CGFloat,
+        minimumBodyHeight: CGFloat
+    ) -> CGFloat? {
+        let availableBodyHeight = maximumExpandedHeight - fixedContentHeight
+        guard maximumExpandedHeight.isFinite,
+              fixedContentHeight.isFinite,
+              bodyContentHeight.isFinite,
+              minimumBodyHeight.isFinite,
+              availableBodyHeight >= minimumBodyHeight
+        else {
+            return nil
+        }
+
+        return min(bodyContentHeight, bodyHeightCap, availableBodyHeight)
     }
 }

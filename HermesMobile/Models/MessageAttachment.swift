@@ -161,6 +161,54 @@ extension MessageAttachment {
         return (markerRange.lowerBound..<markerEnd, references)
     }
 
+    /// A Hermes session's user text as its transcript shows it (#1012), and the chips it
+    /// names. Each `\n\n` block that is a reference a Hermex send appends becomes a chip:
+    /// Hermes's vision-tool instruction pair (`BotAttachmentUpload.imageReference`) or a
+    /// lone `@file:` token, plain or quoted (`file.attach`'s `ref_text`). The footer the
+    /// host saves after a prompt's `@file:` tokens (`--- Context Warnings ---` and
+    /// `--- Attached Context ---`, with the text or path it inlines) is dropped. Each
+    /// attachment carries its display name and the host path the reference names, which
+    /// Bot Chat (#1017) and a Hermes session's chips (#1030) download through; neither shows it.
+    /// Text with neither comes back as it is. The webui marker rule above is separate and
+    /// never reads these.
+    static func hermesReferences(in content: String) -> (text: String, attachments: [MessageAttachment]) {
+        guard content.contains("@file:") || content.contains("[The user attached an image: ")
+                || content.contains(" Context ---") || content.contains("--- Context Warnings ---")
+        else { return (content, []) }
+        // Hermes's text-mode image line pair, whose first line names the stored file, and an
+        // `@file:` token as `file.attach` quotes it: backticks, double or single quotes, or bare.
+        let imageReference =
+            /\[The user attached an image: ([^\n]*)\]\n\[Examine it with the vision_analyze tool using image_url: (\/[^\n]*)\]/
+        let fileReference = /@file:(?:`([^`\n]+)`|"([^"\n]+)"|'([^'\n]+)'|(\S+))/
+        var text = content
+        let footer = text.firstRange(of: /(?:^|\n)--- (?:Context Warnings|Attached Context) ---[ \t]*(?:\n|$)/)
+        if let footer { text = String(text[..<footer.lowerBound]) }
+        var kept: [String] = []
+        var attachments: [MessageAttachment] = []
+        for block in text.components(separatedBy: "\n\n") {
+            let line = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let image = line.wholeMatch(of: imageReference) {
+                attachments.append(MessageAttachment(
+                    name: String(image.1).replacing(/^dashboard_\d{8}_\d{6}_[0-9a-f]{8}_/, with: ""),
+                    path: String(image.2), isImage: true
+                ))
+            } else if let file = line.wholeMatch(of: fileReference),
+                      let path = file.1 ?? file.2 ?? file.3 ?? file.4 {
+                let name = URL(fileURLWithPath: String(path)).lastPathComponent
+                attachments.append(MessageAttachment(
+                    name: name.replacing(/^[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}-/, with: ""),
+                    path: String(path), isImage: false
+                ))
+            } else {
+                kept.append(block)
+            }
+        }
+        guard footer != nil || !attachments.isEmpty else { return (content, []) }
+        var shown = Substring(kept.joined(separator: "\n\n"))
+        while shown.last?.isWhitespace == true { shown = shown.dropLast() }
+        return (String(shown), attachments)
+    }
+
     private static func displayName(for reference: String) -> String {
         let lastPathComponent = URL(fileURLWithPath: reference).lastPathComponent
         return lastPathComponent.isEmpty ? reference : lastPathComponent

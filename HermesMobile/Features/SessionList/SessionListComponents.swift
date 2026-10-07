@@ -1,9 +1,94 @@
 import SwiftUI
 import UIKit
 
+/// The regular-width shell (iPad, landscape Plus/Max). A sidebar root selection
+/// bumps `rootRevision`, which rebuilds only the detail root and pops any screen
+/// pushed above it (#116). The sidebar keeps its identity, scroll position, and
+/// row state across selections (#689); its visibility follows `afterRootSelection`.
+struct SessionSplitView<Sidebar: View, Detail: View>: View {
+    let rootRevision: Int
+    @ViewBuilder let sidebar: Sidebar
+    @ViewBuilder let detail: Detail
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    @State private var detailColumn = DetailColumnNavigation()
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+        } detail: {
+            NavigationStack {
+                detail
+                    .background { DetailColumnNavigationReader(column: detailColumn) }
+            }
+            .id(rootRevision)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .onChange(of: rootRevision) {
+            columnVisibility = columnVisibility.afterRootSelection
+            detailColumn.popToRoot()
+        }
+    }
+}
+
+/// The detail column's `UINavigationController`. The split view adopts the detail
+/// `NavigationStack` into it, and it outlives the stack's identity: re-identifying
+/// the stack rebuilds the root but leaves screens the old root pushed (Settings
+/// subpages, workspace files, forks) on top. A root selection pops them here.
+@MainActor
+private final class DetailColumnNavigation {
+    weak var navigationController: UINavigationController?
+
+    /// Pops the old root's screens as the selection lands, before the new root
+    /// appears, so the new root starts on an empty stack and can push right away.
+    func popToRoot() {
+        guard let navigationController, navigationController.viewControllers.count > 1 else { return }
+        navigationController.popToRootViewController(animated: false)
+    }
+}
+
+/// Records the detail column's navigation controller once the detail root is attached.
+private struct DetailColumnNavigationReader: UIViewControllerRepresentable {
+    let column: DetailColumnNavigation
+
+    final class Controller: UIViewController {
+        var column: DetailColumnNavigation?
+
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            if let navigationController {
+                column?.navigationController = navigationController
+            }
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.column = column
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+}
+
+extension NavigationSplitViewVisibility {
+    /// The sidebar visibility after a root selection. An opened sidebar returns to
+    /// the system default, which hides it where it covers the detail (portrait) and
+    /// keeps it where it sits beside the detail (landscape). A sidebar the user
+    /// collapsed stays collapsed.
+    var afterRootSelection: Self {
+        self == .detailOnly ? .detailOnly : .automatic
+    }
+}
+
 struct SessionListRowActions {
     let retryLoad: () -> Void
     let open: (SessionSummary) -> Void
+    let toggleUnread: (SessionSummary) -> Void
     let togglePinned: (SessionSummary) -> Void
     let archive: (SessionSummary) -> Void
     let delete: (SessionSummary) -> Void
@@ -78,6 +163,8 @@ enum SessionListMotion {
 /// Which of the session list's optional navigation rows are shown, so a user can
 /// hide the parts of the app they never use (issue #189).
 struct SidebarSectionVisibility: Equatable {
+    /// Follows the Bot Mode (beta) gate rather than a per-row Settings toggle.
+    var bots: Bool
     var tasks: Bool
     var kanban: Bool
     var skills: Bool
@@ -88,6 +175,7 @@ struct SidebarSectionVisibility: Equatable {
 
     /// Show every row, primarily for previews and tests.
     static let showAll = SidebarSectionVisibility(
+        bots: true,
         tasks: true,
         kanban: true,
         skills: true,
@@ -97,10 +185,10 @@ struct SidebarSectionVisibility: Equatable {
         projects: true
     )
 
-    /// The five plain links share one List row, so that row is dropped entirely
+    /// The plain links share one List row, so that row is dropped entirely
     /// once all of them are hidden rather than leaving an empty padded gap.
     var showsAnyUtilityLink: Bool {
-        tasks || kanban || skills || memory || insights
+        bots || tasks || kanban || skills || memory || insights
     }
 }
 
@@ -184,6 +272,12 @@ struct SessionSidebarUtilityRows: View {
 
     private var utilityLinks: some View {
         VStack(alignment: .leading, spacing: Self.rowSpacing) {
+            if sectionVisibility.bots {
+                SidebarNavButton(title: String(localized: "Bots"), assetImage: "LucideBot") {
+                    openDestination(.bots)
+                }
+            }
+
             if sectionVisibility.tasks {
                 SidebarNavButton(title: String(localized: "Tasks"), assetImage: "LucideCalendarClock") {
                     openDestination(.tasks)
@@ -532,6 +626,7 @@ struct SessionInteractiveRow: View {
                 showsMessageCount: showsMessageCount,
                 showsWorkspace: showsWorkspace,
                 isViewingCachedData: viewModel.isViewingCachedData,
+                isUnread: viewModel.isUnread(session),
                 attentionState: viewModel.attentionState(for: session),
                 searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText)
             )
@@ -561,6 +656,8 @@ struct SessionInteractiveRow: View {
                 isMovingSession: viewModel.isMovingSession,
                 isLoadingProjects: viewModel.isLoadingProjects,
                 isMutating: viewModel.isMutating(session),
+                isUnread: viewModel.isUnread(session),
+                canToggleUnread: viewModel.canToggleUnread(session),
                 actions: actions
             )
         }
@@ -700,6 +797,8 @@ struct ScheduledSessionsView: View {
     let showsWorkspace: Bool
     let selectedSessionID: String?
     let actions: SessionListRowActions
+    /// The archive Undo toast, when an archive on this screen owns it (#865).
+    let actionToast: ActionToastState?
 
     @State private var searchText = ""
 
@@ -736,6 +835,14 @@ struct ScheduledSessionsView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Scheduled sessions")
         .searchable(text: $searchText, prompt: "Search sessions")
+        .overlay(alignment: .bottom) {
+            if let actionToast {
+                ActionToastView(state: actionToast)
+                    .frame(maxWidth: 420)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 22)
+            }
+        }
     }
 
     private var sessions: [SessionSummary] {
@@ -757,6 +864,8 @@ struct SessionRowContextMenu: View {
     let isMovingSession: Bool
     let isLoadingProjects: Bool
     let isMutating: Bool
+    let isUnread: Bool
+    let canToggleUnread: Bool
     let actions: SessionListRowActions
 
     var body: some View {
@@ -772,6 +881,13 @@ struct SessionRowContextMenu: View {
                 Label("Copy Full Title", systemImage: "doc.on.doc")
             }
         }
+
+        Button {
+            actions.toggleUnread(session)
+        } label: {
+            Label(isUnread ? "Mark as Read" : "Mark as Unread", systemImage: isUnread ? "envelope.open" : "envelope.badge")
+        }
+        .disabled(!canToggleUnread)
 
         if SessionRowActionPolicy.offersMutationActions(for: session) {
             Button {

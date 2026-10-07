@@ -8,6 +8,11 @@ enum HermesDeepLink {
 
     static let sessionHost = "session"
 
+    /// Host for the one bot route (#554): `hermes-agent://bot?server=…&connection=…&profile=…`.
+    /// The builder, parser and typed `BotDestination` live in `Features/Bots/BotDeepLink.swift`,
+    /// which is main-app only; this file is shared with the Live Activity widget.
+    static let botHost = "bot"
+
     /// Host for the parameter-less "open the New Chat composer" deep link used by the
     /// New Chat App Intent (issue #337). Mirrors the share extension's host-based routing
     /// so the intent can reuse `ContentView.handleOpenURL` rather than inventing a new path.
@@ -88,6 +93,19 @@ enum HermesDeepLink {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Server-owned webui destination, shared by notification and Live Activity taps.
+    /// The main app's WebuiPushDestination parses it and owns sign-in/server routing.
+    static func webuiSessionURL(server: URL, sessionID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = "webui-push"
+        components.queryItems = [
+            URLQueryItem(name: "server", value: server.absoluteString),
+            URLQueryItem(name: "id", value: sessionID)
+        ]
+        return components.url
+    }
+
     static func sessionURL(sessionID: String) -> URL? {
         guard !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
@@ -125,5 +143,41 @@ enum HermesDeepLink {
     private static func normalizedSessionID(_ rawValue: String?) -> String? {
         let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Shared by the Lock Screen and Dynamic Island, and exercised by main-app tests.
+enum AgentRunTapTarget {
+    /// Starts a Hermes session's interim activity key, `hermes:<profile>:<stored key>`
+    /// (#1014). Until #706 such an activity has no destination: a tap opens the app as it is.
+    static let hermesSessionPrefix = "hermes:"
+
+    static func url(attributes: AgentRunActivityAttributes, sessionID: String, activityID: String) -> URL? {
+        guard attributes.bot != nil || !attributes.sessionID.hasPrefix(hermesSessionPrefix) else { return nil }
+        let destination: URL?
+        if let bot = attributes.bot {
+            destination = bot.destinationURL
+        } else if let server = attributes.server {
+            destination = HermesDeepLink.webuiSessionURL(server: server, sessionID: sessionID)
+        } else {
+            // Activities persisted before server ownership was recorded keep their old route.
+            destination = HermesDeepLink.sessionURL(sessionID: sessionID)
+        }
+        guard let destination,
+              var components = URLComponents(url: destination, resolvingAgainstBaseURL: false) else { return nil }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "activity" }
+        items.append(URLQueryItem(name: "activity", value: activityID))
+        components.queryItems = items
+        return components.url
+    }
+
+    static func activityID(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == HermesDeepLink.scheme,
+              [HermesDeepLink.sessionHost, HermesDeepLink.botHost, "webui-push"].contains(url.host?.lowercased() ?? "")
+        else { return nil }
+        let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name == "activity" })?.value
+        return id?.isEmpty == false ? id : nil
     }
 }

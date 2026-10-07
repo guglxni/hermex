@@ -73,6 +73,95 @@ Hermex deliberately does not expose backend-only hard deletion, archived-Board
 enumeration/restoration, the global `PATCH /api/kanban/config` grouping mutation, the
 legacy Card patch alias, or unsupported task attachments.
 
+## Hermes
+
+A Hermes server's Kanban (#1043) is the host's bundled Kanban plugin, read and written
+(#1044) by `HermesKanbanClient` over the server's shared `HermesConnection` (its sign-in,
+cookie jar and connection headers), and kept live over the Board's Kanban socket
+(`KanbanWebSocketEventClient`, #1045). Until #709 gives it a home, the Hermes inbox's + menu
+offers it in DEBUG builds and Hermex Branch only.
+
+Read at the pin (`ca678285`, 0.21.5; `plugins/kanban/dashboard/plugin_api.py`) and checked
+against `scripts/local-hermes`. Every route is under `/api/plugins/kanban`, and every Card
+route takes `?board=<slug>`; an unknown Board or Card is 404.
+
+| Route | Shape (a route without a method is a GET) |
+|---|---|
+| `/config` | `{default_tenant, lane_by_profile, include_archived_by_default, render_markdown}`. No Columns and no `read_only`. |
+| `/boards` | `{boards: [{slug, name, description, icon, color, archived, is_current, counts, total, default_workspace_kind, …}], current}`. |
+| `/board?board=&tenant=&include_archived=` | `{columns: [{name, tasks}], tenants, assignees, latest_event_id, now}`. Columns are `triage, todo, scheduled, ready, running, blocked, review, done`, plus `archived` when included. No `changed`, no `read_only`, and no assignee or only-mine filter. |
+| `/tasks/{id}` | `{task, comments, events, attachments, links {parents, children}, link_tasks, child_results, runs}`. |
+| `/tasks/{id}/log?tail=` | `{task_id, path, exists, size_bytes, content, truncated}`; a Card that never ran is `exists: false`, not 404. |
+| `/stats`, `/assignees` | `{by_status, by_assignee: {name: {status: n}}, …}` and `{assignees: [{name, on_disk, counts}]}`. |
+| `/events?board=&since=&ticket=` (WebSocket) | `{events: [{id, task_id, run_id, kind, payload, created_at}], cursor}`, only when events after `since` exist, at most 200 a frame. No hello, no heartbeat, and client messages are ignored. A used, expired or missing ticket is HTTP 403 on the upgrade. |
+| `POST /tasks` | `{title, body?, assignee, tenant?, priority?, workspace_kind?, parents?, triage, idempotency_key, max_runtime_seconds?, skills?}` → `{task, warning?}`. No `status`: Triage is `triage: true`, otherwise the host starts the Card in To Do while a parent is open and Ready otherwise. `assignee: ""` is a 400, so none is null. `warning` is a Ready, assigned Card with no dispatcher running. |
+| `PATCH /tasks/{id}` | `{title, body, priority, assignee?, status?, block_reason?}` → `{task}`. No tenant field. `assignee: ""` unassigns, and any `assignee` on a running, claimed Card is 409, so it is sent only when it changed. Block, unblock, Done, Archive and moves are all `status`. |
+| `POST /tasks/{id}/comments` | `{body}` → `{ok: true}`, without the comment. |
+| `POST /links`, `DELETE /links?parent_id=&child_id=` | `{parent_id, child_id}` → `{ok, gated}`, and `{ok}` (200 `false` when there was no link). Neither echoes an id. A self-link, unknown id, running child or cycle is 400. |
+| `POST /tasks/bulk` | `{ids, status? \| assignee? \| priority? \| archive}` → `{results: [{id, ok, error?}]}`, 200 with per-Card failures. |
+| `POST /dispatch?board=&dry_run=&max=8` | The `DispatchResult` webui's keys match. A dry run starts no worker but does promote To Do Cards whose parents are done. |
+| `POST /boards`, `PATCH /boards/{slug}`, `DELETE /boards/{slug}?delete=false`, `POST /boards/{slug}/switch` | `{slug, name, description, icon, color}` → `{board, current}`; `{board}`; `{result, current}`; `{current}`. Never `default_workdir` or `project_id`. The default Board can't be archived (400). |
+
+How Hermex adapts it:
+
+- **Absent plugin.** 404 on `/config` is a host without Kanban: `{"detail": "No such API
+  endpoint: …"}` when the plugin never mounted, `{"detail": "Plugin not found"}` when it
+  was disabled at runtime. Kanban shows as unavailable, not as an error.
+- **Handshake.** The Board's own Columns stand in for `/config`'s, in the host's order, and
+  the Board needs no `changed`. A Card Status outside those Columns still flags.
+- **Writable.** Every reply is marked `read_only: false`: the host has no read-only mode.
+- **No To Do.** The host promotes a To Do Card whose parents are done to Ready on its next
+  dispatcher tick, so To Do never sticks. New Cards start in Triage or Ready, and Move, the
+  Bulk Actions and Undo Archive offer Triage and Ready only; the host itself puts a Card in
+  To Do while a prerequisite is open, and the Board shows it there. Scheduled and Review are
+  never destinations, but a Card in either moves out: Ready from Scheduled unblocks it, and
+  any move from Review reopens it. Undo Archive returns a Triage Card to Triage and any
+  other to Ready, except Done, which offers no Undo: the host refuses Done from Archived.
+- **Where a Card lands.** Block is offered only on Ready and Running Cards, the only ones the
+  host blocks, and a repeat block can land the Card in Triage. Unblock (Ready from Blocked)
+  lands in Ready, To Do or Review. A write succeeds wherever the reply puts the Card short of
+  where it started (`KanbanBackend.accepts`), and the Card shows there.
+- **Complete.** Offered only on a Card in Review: the host completes any other Card only
+  with a result, which Hermex doesn't send, and refuses it with a 400. The Bulk Action to
+  Done stays, for approving Review Cards, and shows any other Card as failed.
+- **Editor.** Tenant is set on create and read-only after; an edit never sends it. The
+  workspace kind starts at the Board's `default_workspace_kind` and is sent unless it is a
+  Scratch nobody picked. An omitted kind is Scratch on a Board without a project, even one
+  with a directory, and the project's worktree on a project Board. There is no workspace
+  path: the host takes it from the Board's directory.
+- **After a write.** No reply says what else changed, so every Card write reads the Board
+  again (a gated or promoted dependent moves too); a comment reads the Card again. A 400 or
+  409 `{detail}` shows the host's own words where the failure shows, and the Card stays
+  where the host has it. A create `warning` shows as a dismissible notice on the Board.
+- **Filters.** The Assigned Profile filter runs on the client; Only Mine is not offered,
+  because the host's Kanban has no active chat Profile.
+- **Host data never kept.** `workspace_path`, `stored_path`, a log's `path`, `db_path`,
+  `default_workdir`, an archived Board's `new_path`, `worker_pid` and `claim_lock` (on Cards
+  and on runs) are dropped from every reply before it is decoded, so no view or log can show them.
+- **Errors.** A transport failure is offline, 502–504 and 520–530 are server unavailable,
+  and a refused or replaced sign-in reads as signed out. The sign-out itself stays with
+  `HermesConnection`, never `onAPIError`.
+- **Live updates.** One socket per open Board, pinned to it, from the Board's
+  `latest_event_id`. Every connect mints a fresh `POST /api/auth/ws-ticket` ticket through
+  `HermesConnection` (never the gateway's) and sends the connection headers on the upgrade,
+  to its own origin only. It offers no subprotocol: the host accepts without echoing one. A
+  completed upgrade is live; a frame advances the cursor and triggers the same coalesced
+  Board reload as webui's. Leaving the Board, the background and a server switch close it.
+- **Keepalive.** The host sends nothing on a quiet Board, and a dashboard bound to loopback
+  (how a tunneled one runs) sends no protocol pings, so Cloudflare would close the socket at
+  about 100 s. The phone pings every 25 s; a ping with neither its pong nor a frame by the
+  next one ends the socket.
+- **Reconnect.** A 403 on the upgrade tries one fresh ticket first. Reconnects wait 1, 2, 5
+  and 10 s, then 30 s each. From the third failure the Board shows **Live updates delayed**
+  and polls while the socket keeps reconnecting: there is no events route, so polling reloads
+  the Board every 30 s and keeps it while its `latest_event_id` has not moved. The socket
+  opening stops the polling and clears the notice. Polling that started without a failing
+  socket (a foreground check the host refused, or an offline Board) reopens the socket at
+  its first successful poll.
+- **Cursor regression.** The host sends only ids above `since`, so a recreated database
+  would stay silent. A Board reload whose `latest_event_id` is below the cursor the request
+  started with takes that lower cursor and reopens the socket.
+
 ## Native information architecture and interaction model
 
 Kanban is a distinct `SessionListUtilityDestination` constructed with the active
@@ -102,7 +191,10 @@ The interaction model is **Status Focus**:
 Card summaries preserve ID, priority, tenant, title, Markdown-aware body preview,
 Assigned Profile/Unassigned, comment/dependency counts, age, and the verified WebUI
 staleness thresholds: Running at 10 minutes/1 hour, Ready at 1 hour, and Blocked at
-1 hour/24 hours. Running is visible but is never offered as a direct destination.
+1 hour/24 hours. Age comes from the `{created_age_seconds, started_age_seconds}` dict
+both servers send (webui as `age_seconds`, Hermes as `age`): a Running Card reads its
+started age, every other Card its created age, and a plain number from an older bridge
+stands for both. Running is visible but is never offered as a direct destination.
 
 Card detail preserves Markdown description, metadata, comments, events,
 Prerequisites/Dependents, Dispatch Runs, and explicitly requested worker-log content.
@@ -152,10 +244,20 @@ original selection automatically.
 ## Live updates, offline behavior, and Dispatcher
 
 SSE is primary while Kanban is visible. Coalesce event bursts before refetching
-affected Board/Card state. After repeated stream failures, use 30-second event polling
+affected Board/Card state. A burst refetches only the Board (stats and assignee history
+refresh on load, pull, a foreground that finds the Board changed, and mutations, or on
+a burst only while they have not settled yet or the burst's refetch superseded a
+refresh still reading them), and a burst
+that lands mid-refetch queues one debounced follow-up refetch instead of cancelling the
+one in flight. After repeated stream failures, use 30-second event polling
 and show a subtle persistent **Live updates delayed** notice. Pull-to-refresh performs
-a full reload and retries SSE. Suspend live refresh in the background and reconcile
-immediately on foreground.
+a full reload and retries SSE. Suspend live refresh only in the background; `.inactive`
+overlays (Control Center, Notification Center, the app switcher) keep the stream. On
+foreground, fetch the Board with `since` set to the snapshot's cursor: a `changed:false`
+answer keeps the Board, stats, and Board list and resumes SSE from the cursor, and a
+changed Board also reconciles the Board list, stats, and assignee history. Upstream's
+`latest_event_id` ignores filters, so send `since` only when the snapshot came from the
+current Board and filters; otherwise fetch in full.
 
 When connectivity drops, preserve the in-memory snapshot, mark it
 **Offline—showing previously loaded data**, mark loaded detail stale, and disable all

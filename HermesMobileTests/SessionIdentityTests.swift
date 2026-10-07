@@ -83,6 +83,25 @@ final class SessionIdentityTests: XCTestCase {
         XCTAssertNil(SessionRowView.metadataLabel(for: session, showsMessageCount: false, showsWorkspace: false))
     }
 
+    func testRelativeDateLabelUsesSuppliedNow() {
+        let lastActivity = Date(timeIntervalSince1970: 1_000_000)
+        let session = SessionSummary(sessionId: "timed", lastMessageAt: lastActivity.timeIntervalSince1970)
+        let minuteLater = lastActivity.addingTimeInterval(60)
+        let twoHoursLater = lastActivity.addingTimeInterval(2 * 3600)
+        // Independent oracle with the row's documented style, in the test's locale.
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+
+        let minuteLabel = SessionRowView.relativeDateLabel(for: session, now: minuteLater)
+        let hoursLabel = SessionRowView.relativeDateLabel(for: session, now: twoHoursLater)
+
+        XCTAssertEqual(minuteLabel, formatter.localizedString(for: lastActivity, relativeTo: minuteLater))
+        XCTAssertEqual(hoursLabel, formatter.localizedString(for: lastActivity, relativeTo: twoHoursLater))
+        XCTAssertNotEqual(minuteLabel, hoursLabel)
+        XCTAssertNil(SessionRowView.relativeDateLabel(for: SessionSummary(sessionId: "untimed"), now: twoHoursLater))
+        XCTAssertNil(SessionRowView.relativeDateLabel(for: SessionSummary(sessionId: "zero", lastMessageAt: 0), now: twoHoursLater))
+    }
+
     func testSessionRowAccessibilityStateLabelsIncludeAttentionPinnedAndCachedState() {
         let session = SessionSummary(
             sessionId: "stateful",
@@ -305,7 +324,6 @@ final class AvatarServerSwitcherModelTests: XCTestCase {
             displayName: displayName,
             initials: "",
             headerLogoColorHex: HeaderLogoColor.defaultHex,
-            customHeadersRef: id,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
@@ -459,7 +477,7 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         XCTAssertTrue(visibility.showsAnyUtilityLink)
     }
 
-    func testUtilityLinkRowDropsOnlyWhenAllFiveAreHidden() {
+    func testUtilityLinkRowDropsOnlyWhenEveryLinkIsHidden() {
         var visibility = SidebarSectionVisibility.showAll
         visibility.tasks = false
         visibility.kanban = false
@@ -467,6 +485,8 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         visibility.memory = false
         visibility.insights = false
 
+        XCTAssertTrue(visibility.showsAnyUtilityLink, "the Bots row keeps the row alive while Bot Mode is on")
+        visibility.bots = false
         XCTAssertFalse(visibility.showsAnyUtilityLink)
     }
 

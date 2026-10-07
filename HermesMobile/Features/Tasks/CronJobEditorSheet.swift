@@ -4,12 +4,18 @@ import SwiftUI
 /// Tasks toolbar's "New Task" and a task's own Edit action — present this same
 /// sheet, so the Configuration section's model and profile pickers are loaded
 /// and behave identically in each.
+///
+/// On a Hermes host (#1040) the sheet has no toast setting, its sources follow the
+/// Task's Profile, and an existing Task's Profile can't change (`locksProfile`).
 struct CronJobEditorSheet: View {
     let title: String
     let saveTitle: String
     let isSaving: Bool
     let errorMessage: String?
     let onSave: (CronJobEditorDraft) async -> Bool
+    private let server: URL
+    private let client: any CronDataClient
+    private let locksProfile: Bool
 
     @State private var draft: CronJobEditorDraft
     /// The Configuration section's model catalog and profile list. Loaded when
@@ -18,6 +24,10 @@ struct CronJobEditorSheet: View {
     @State private var isPresentingModelPicker = false
     @State private var isPresentingProfilePicker = false
     @State private var isPresentingSkillsPicker = false
+    /// The draft when the user picked another Profile on a server that scopes the
+    /// editor's sources by Profile, until that Profile's lists load and the choices
+    /// made for the old one are checked (#1040).
+    @State private var draftAtProfilePick: CronJobEditorDraft?
     @Environment(\.dismiss) private var dismiss
 
     /// Server-provided deliver targets. A plain `let` so a re-init while the
@@ -34,7 +44,7 @@ struct CronJobEditorSheet: View {
     /// another option. `nil` means fall back to free-text entry.
     private var deliverPickerOptions: [CronDeliverPickerOption]? {
         CronDeliverPicker.options(
-            serverOptions: serverDeliveryOptions,
+            serverOptions: configuration.deliveryOptions ?? serverDeliveryOptions,
             currentValue: draft.deliver,
             initialValue: initialDeliver
         )
@@ -48,17 +58,25 @@ struct CronJobEditorSheet: View {
         isSaving: Bool,
         errorMessage: String?,
         deliveryOptions: [CronDeliveryOption]? = nil,
+        client: (any CronDataClient)? = nil,
+        locksProfile: Bool = false,
         onSave: @escaping (CronJobEditorDraft) async -> Bool
     ) {
+        let client = client ?? APIClient(baseURL: server)
         self.title = title
         self.saveTitle = saveTitle
         self.isSaving = isSaving
         self.errorMessage = errorMessage
         self.onSave = onSave
+        self.server = server
+        self.client = client
+        self.locksProfile = locksProfile
         self.serverDeliveryOptions = deliveryOptions
         self.initialDeliver = draft.deliver
         _draft = State(initialValue: draft)
-        _configuration = State(initialValue: CronJobEditorConfigurationLoader(server: server))
+        _configuration = State(initialValue: CronJobEditorConfigurationLoader(
+            server: server, client: client, profile: draft.trimmedProfile
+        ))
     }
 
     var body: some View {
@@ -95,7 +113,9 @@ struct CronJobEditorSheet: View {
                             .autocorrectionDisabled()
                     }
 
-                    Toggle("Toast Notifications", isOn: $draft.toastNotifications)
+                    if client.cronFeatures.hasToastNotifications {
+                        Toggle("Toast Notifications", isOn: $draft.toastNotifications)
+                    }
                 }
 
                 Section {
@@ -116,6 +136,7 @@ struct CronJobEditorSheet: View {
                         profiles: configuration.profiles,
                         errorMessage: configuration.profilesErrorMessage,
                         isLoading: configuration.isLoadingProfiles,
+                        isLocked: locksProfile,
                         action: { isPresentingProfilePicker = true },
                         onRetry: { Task { await configuration.loadProfiles() } }
                     )
@@ -139,8 +160,21 @@ struct CronJobEditorSheet: View {
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            .task {
-                await configuration.load()
+            // A new loader is a new Profile's sources, so its loads start over. Once a
+            // picked Profile's lists arrive, the earlier targets and skills it lacks go.
+            .task(id: ObjectIdentifier(configuration)) {
+                let loader = configuration
+                await loader.load()
+                guard let earlier = draftAtProfilePick, !Task.isCancelled else { return }
+                draftAtProfilePick = nil
+                draft.keepChoices(madeBefore: earlier, offeredTargets: loader.deliveryOptions?.compactMap(\.value),
+                                  offeredSkills: loader.skillsErrorMessage == nil ? loader.skills.compactMap(\.name) : nil)
+            }
+            .onChange(of: draft.trimmedProfile) { _, profile in
+                guard client.cronFeatures.isProfileScoped else { return }
+                // A second pick before the first one's lists load still checks the first's choices.
+                if draftAtProfilePick == nil { draftAtProfilePick = draft }
+                configuration = CronJobEditorConfigurationLoader(server: server, client: client, profile: profile)
             }
             .sheet(isPresented: $isPresentingModelPicker) {
                 ModelPickerSheet(

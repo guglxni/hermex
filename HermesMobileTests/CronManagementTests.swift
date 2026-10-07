@@ -198,6 +198,7 @@ final class CronManagementModelTests: XCTestCase {
 final class CronManagementViewModelTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
+        HermesHostFixture.reset()
         super.tearDown()
     }
 
@@ -449,6 +450,32 @@ final class CronManagementViewModelTests: XCTestCase {
             return
         }
         XCTAssertEqual(updatedJob.jobId, "job123")
+    }
+
+    /// webui starts the run and answers at once: the Task shows as running from the answer,
+    /// and nothing follows it (#1041 leaves this as it was).
+    @MainActor
+    func testTaskDetailViewModelWebuiRunNowShowsTheRunAtOnce() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/crons/run")
+            return apiTestJSONResponse(#"{"ok": true, "job": {"id": "job123", "name": "Digest", "state": "scheduled"}}"#,
+                                       for: request)
+        }
+        let clock = RunNowClock()
+        let viewModel = TaskDetailViewModel(
+            job: try decodeCronJob(#"{"id": "job123", "name": "Digest"}"#),
+            runningElapsed: nil,
+            server: try XCTUnwrap(URL(string: "https://example.test")),
+            client: client,
+            sleep: clock.sleep
+        )
+
+        let didRun = await viewModel.runNow()
+
+        XCTAssertTrue(didRun)
+        XCTAssertEqual(viewModel.runningElapsed, 0)
+        XCTAssertEqual(viewModel.runNowState, .idle)
+        XCTAssertEqual(clock.begun, 0, "No list reads follow it")
     }
 
     @MainActor

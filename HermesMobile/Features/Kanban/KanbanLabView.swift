@@ -193,6 +193,12 @@ struct KanbanStatusFocusView: View {
                     detail: String(localized: "No Kanban changes were made."),
                     systemImage: "exclamationmark.triangle"
                 )
+            case .unavailable:
+                unavailableContent(
+                    title: String(localized: "Kanban isn’t available on this server."),
+                    detail: String(localized: "Turn on the Kanban plugin on the Hermes host, then try again."),
+                    systemImage: "puzzlepiece.extension"
+                )
             }
         }
         .onGeometryChange(for: CGFloat.self) { proxy in
@@ -224,7 +230,7 @@ struct KanbanStatusFocusView: View {
             KanbanCardEditorView(
                 state: editor,
                 allowsMutation: editor.isEditing ? model.canEditCards : model.canCreateCards,
-                onSaved: { await model.reconcileAfterCardMutation() }
+                onSaved: { await model.reconcileAfterCardMutation(notice: editor.notice) }
             )
         }
         .sheet(isPresented: $showsBulkActions, onDismiss: {
@@ -320,8 +326,7 @@ struct KanbanStatusFocusView: View {
     }
 
     private func updateSceneActivity(_ phase: ScenePhase) {
-        let isActive = phase == .active
-        Task { await model.setSceneActive(isActive) }
+        Task { await model.setScenePhase(phase) }
     }
 
     private var loadingContent: some View {
@@ -350,6 +355,9 @@ struct KanbanStatusFocusView: View {
             }
             if model.hasAvailableArchiveUndo, let undo = model.archiveUndo {
                 archiveUndoBanner(undo)
+            }
+            if let notice = model.cardNotice {
+                cardNoticeBanner(notice)
             }
             if model.bulkActionPhase != nil {
                 bulkProgressBanner
@@ -750,7 +758,8 @@ struct KanbanStatusFocusView: View {
     }
 
     private func archiveUndoBanner(_ undo: KanbanArchiveUndo) -> some View {
-        let recoveryPhase = model.mutationState(for: undo.cardID)?.phase
+        let recovery = model.mutationState(for: undo.cardID)
+        let recoveryPhase = recovery?.phase
         let statusText = recoveryPhase == .outcomeUncertain
             ? String(localized: "Outcome Uncertain")
             : recoveryPhase == .failed
@@ -758,11 +767,17 @@ struct KanbanStatusFocusView: View {
                 : String(localized: "Archived")
         let hasRecoveryError = recoveryPhase == .outcomeUncertain || recoveryPhase == .failed
         return HStack {
-            Label(
-                statusText,
-                systemImage: hasRecoveryError ? "exclamationmark.circle" : "archivebox"
-            )
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(
+                    statusText,
+                    systemImage: hasRecoveryError ? "exclamationmark.circle" : "archivebox"
+                )
+                    .lineLimit(2)
+                if recoveryPhase == .failed, let message = recovery?.message {
+                    Text(verbatim: message)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer()
             if recoveryPhase == .outcomeUncertain {
                 Button("Refresh") {
@@ -791,6 +806,32 @@ struct KanbanStatusFocusView: View {
             )
         )
         .accessibilityFocused($archiveUndoIsFocused)
+    }
+
+    /// The server's note on the Card just created, such as a Hermes host's warning that no
+    /// dispatcher is running to pick it up (#1044).
+    private func cardNoticeBanner(_ notice: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Label {
+                Text(verbatim: notice)
+            } icon: {
+                Image(systemName: "info.circle")
+            }
+            Spacer()
+            Button {
+                model.dismissCardNotice()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .accessibilityLabel(Text("Dismiss"))
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal)
+        .padding(.vertical, 4)
+        .background(.secondary.opacity(0.08))
+        .accessibilityElement(children: .contain)
     }
 
     private var offlineBanner: some View {
@@ -1089,7 +1130,7 @@ struct KanbanStatusFocusView: View {
 
     private var cardList: some View {
         List {
-            if model.isRefreshing {
+            if model.showsBoardLoadingRow {
                 HStack {
                     Spacer()
                     ProgressView("Refreshing Board")
@@ -1202,10 +1243,10 @@ struct KanbanStatusFocusView: View {
             }
             if card.status?.rawValue == "blocked" {
                 Button("Unblock") { request(.unblock, for: card) }
-            } else if card.status?.rawValue != "archived" {
+            } else if model.canBlock(card) {
                 Button("Block") { request(.block, for: card) }
             }
-            if card.status?.rawValue != "done", card.status?.rawValue != "archived" {
+            if model.canComplete(card) {
                 Button("Complete") { request(.complete, for: card) }
             }
             if card.status?.rawValue != "archived" {
@@ -1235,10 +1276,16 @@ struct KanbanStatusFocusView: View {
                 Label("Updated", systemImage: "checkmark.circle.fill")
                     .font(.footnote).foregroundStyle(.green)
             case .failed:
-                HStack {
-                    Label("Update failed", systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.red)
-                    Button("Try Again") { retryMutation(for: card) }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Label("Update failed", systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.red)
+                        Button("Try Again") { retryMutation(for: card) }
+                    }
+                    if let message = mutation.message {
+                        Text(verbatim: message)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.footnote)
             case .outcomeUncertain:
@@ -1267,24 +1314,25 @@ struct KanbanStatusFocusView: View {
     ) {
         Task {
             switch action {
+            // A Hermes host can land a Card elsewhere than asked (#1044), so the list follows it.
             case let .move(status):
                 await model.moveCard(card, to: status, confirmingRunningExit: confirmingRunningExit)
                 if model.mutationState(for: card.cardID)?.phase == .succeeded {
-                    model.selectedStatus = status
+                    model.selectedStatus = model.status(ofCard: card.cardID) ?? status
                     await Task.yield()
                     focusedCardID = card.cardID
                 }
             case .block:
                 await model.blockCard(card, reason: nil, confirmingRunningExit: confirmingRunningExit)
                 if model.mutationState(for: card.cardID)?.phase == .succeeded {
-                    model.selectedStatus = "blocked"
+                    model.selectedStatus = model.status(ofCard: card.cardID) ?? "blocked"
                     await Task.yield()
                     focusedCardID = card.cardID
                 }
             case .unblock:
                 await model.unblockCard(card)
                 if model.mutationState(for: card.cardID)?.phase == .succeeded {
-                    model.selectedStatus = "ready"
+                    model.selectedStatus = model.status(ofCard: card.cardID) ?? "ready"
                     await Task.yield()
                     focusedCardID = card.cardID
                 }
@@ -1740,6 +1788,11 @@ private struct KanbanBoardManagementView: View {
                     .font(.headline)
                 Text(boardMutationPhase(mutation.phase))
                     .foregroundStyle(.secondary)
+                if let message = mutation.message {
+                    Text(verbatim: message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             if mutation.phase == .outcomeUncertain {
@@ -1844,6 +1897,10 @@ private struct KanbanBoardEditorView: View {
                 Section {
                     Text(mutation.phase == .failed ? "Failed" : "Outcome Uncertain")
                         .foregroundStyle(.red)
+                    if let message = mutation.message {
+                        Text(verbatim: message)
+                            .font(.footnote)
+                    }
                     Text("Refresh the Board before trying again.")
                         .font(.footnote)
                 }
@@ -1902,9 +1959,18 @@ private struct KanbanBulkActionsView: View {
     let model: KanbanFeatureState
     let onArchive: () -> Void
     let onFinished: () -> Void
-    @State private var status = "todo"
+    @State private var status: String
     @State private var profile: String?
     @State private var priority = 0
+
+    init(model: KanbanFeatureState, onArchive: @escaping () -> Void, onFinished: @escaping () -> Void) {
+        self.model = model
+        self.onArchive = onArchive
+        self.onFinished = onFinished
+        // To Do, as before, where it is offered; a Hermes host offers no To Do (#1044).
+        let options = model.bulkStatusOptions
+        _status = State(initialValue: options.contains("todo") ? "todo" : options.first ?? "triage")
+    }
 
     var body: some View {
         NavigationStack {
@@ -1976,7 +2042,7 @@ private struct KanbanBulkActionsView: View {
     }
 
     private var statusOptions: [String] {
-        (model.configuration?.columns ?? []).filter { $0 != "running" }
+        model.bulkStatusOptions
     }
 
     private func submit(_ action: KanbanBulkAction) {
@@ -2008,10 +2074,12 @@ private struct KanbanFiltersView: View {
                         }
                     }
                     .disabled(draft.onlyMine)
-                    Toggle("Only Mine", isOn: $draft.onlyMine)
-                        .onChange(of: draft.onlyMine) { _, enabled in
-                            if enabled { draft.profile = nil }
-                        }
+                    if model.offersOnlyMine {
+                        Toggle("Only Mine", isOn: $draft.onlyMine)
+                            .onChange(of: draft.onlyMine) { _, enabled in
+                                if enabled { draft.profile = nil }
+                            }
+                    }
                 }
 
                 Section("Tenant") {
@@ -2321,9 +2389,11 @@ struct KanbanStatusPresentation {
         switch rawValue {
         case "triage": String(localized: "Triage")
         case "todo": String(localized: "To Do")
+        case "scheduled": String(localized: "Scheduled")
         case "ready": String(localized: "Ready")
         case "running": String(localized: "Running")
         case "blocked": String(localized: "Blocked")
+        case "review": String(localized: "Review")
         case "done": String(localized: "Done")
         case "archived": String(localized: "Archived")
         case "": String(localized: "Unknown Status")
@@ -2335,9 +2405,11 @@ struct KanbanStatusPresentation {
         switch rawValue {
         case "triage": .gray
         case "todo": .blue
+        case "scheduled": .indigo
         case "ready": .mint
         case "running": .orange
         case "blocked": .red
+        case "review": .yellow
         case "done": .green
         case "archived": .secondary
         default: .purple
@@ -2357,10 +2429,22 @@ struct KanbanView: View {
         )
     }
 
+    /// Kanban on a Hermes server, read through its saved connection's shared sign-in and kept
+    /// live over its Kanban socket. A refused sign-in signs the server out through that
+    /// connection, not `onAPIError`.
+    init(server: URL, hermes connection: HermesConnection) {
+        _model = State(
+            initialValue: KanbanFeatureState(
+                server: server,
+                client: HermesKanbanClient(http: connection)
+            )
+        )
+    }
+
     var body: some View {
         KanbanStatusFocusView(model: model)
             .task {
-                await model.load()
+                await model.loadIfNeeded()
             }
     }
 }
@@ -2421,17 +2505,19 @@ struct KanbanLabView: View {
             .toolbar {
                 ToolbarItem(placement: .bottomBar) {
                     Menu {
-                        Picker("Scenario", selection: $scenario) {
+                        Picker(selection: $scenario) {
                             ForEach(KanbanLabScenario.allCases) { scenario in
                                 Text(scenario.title).tag(scenario)
                             }
+                        } label: {
+                            Text(verbatim: "Scenario")
                         }
                     } label: {
                         Image(systemName: "testtube.2")
                             .frame(minWidth: 44, minHeight: 44)
                     }
-                    .accessibilityLabel(Text("Kanban Lab Scenario"))
-                    .accessibilityHint(Text("Uses local fixtures and never contacts or changes a Kanban server."))
+                    .accessibilityLabel(Text(verbatim: "Kanban Lab Scenario"))
+                    .accessibilityHint(Text(verbatim: "Uses local fixtures and never contacts or changes a Kanban server."))
                 }
             }
             .task(id: scenario) {
@@ -2922,7 +3008,7 @@ actor KanbanLabClient: KanbanDataClient {
                 priority: request.priority ?? 0,
                 assignee: request.assignee,
                 tenant: request.tenant,
-                workspaceKind: request.workspaceKind,
+                workspaceKind: request.workspaceKind ?? "scratch",
                 workspacePath: request.workspacePath,
                 skills: request.skills,
                 maxRuntimeSeconds: request.maxRuntimeSeconds,
@@ -2999,7 +3085,8 @@ private final class KanbanLabStreamClient: KanbanEventStreamingClient {
     init(fails: Bool) { self.fails = fails }
 
     func start(
-        url: URL,
+        board: String,
+        since: Int,
         onFrame: @escaping @MainActor (KanbanStreamFrame) -> Void,
         onFailure: @escaping @MainActor () -> Void
     ) {
@@ -3010,10 +3097,7 @@ private final class KanbanLabStreamClient: KanbanEventStreamingClient {
             if fails {
                 onFailure()
             } else {
-                let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-                let board = components?.queryItems?.first(where: { $0.name == "board" })?.value ?? "main"
-                let cursor = Int(components?.queryItems?.first(where: { $0.name == "since" })?.value ?? "0") ?? 0
-                onFrame(.hello(cursor: cursor, board: board))
+                onFrame(.hello(cursor: since, board: board))
             }
         }
     }

@@ -71,6 +71,23 @@ struct ChatSteerResponse: Decodable, Equatable {
     let error: String?
 }
 
+/// What became of a steer, independent of the transport that carried it.
+/// `APIClient.steerChat` maps webui's `{accepted, fallback}` reply here, so the
+/// Hermes gateway (#701) only needs a new mapping. No case stops the run.
+enum ChatSteerOutcome {
+    /// The agent took the hint into the running turn.
+    case delivered
+    /// The run can't take steers (webui's gateway backend); the message waits
+    /// for the next turn.
+    case serverQueued
+    /// The session has no live run any more; the message goes out as a normal send.
+    case runEnded
+    /// Anything else. `transportError` is set when the request itself failed
+    /// (network, HTTP status, or an unreadable reply), so an expired login can
+    /// still sign out.
+    case refused(transportError: Error?)
+}
+
 struct BtwStartResponse: Decodable, Equatable {
     let streamId: String?
     let sessionId: String?
@@ -323,6 +340,8 @@ struct SettingsResponse: Decodable, Equatable {
     let passwordAuthEnabled: Bool?
     let passkeysEnabled: Bool?
     let passwordlessEnabled: Bool?
+    let ttsVoice: String?
+    let ttsEngine: String?
 
     private enum CodingKeys: String, CodingKey {
         case botName
@@ -338,6 +357,8 @@ struct SettingsResponse: Decodable, Equatable {
         case passwordAuthEnabled
         case passkeysEnabled
         case passwordlessEnabled
+        case ttsVoice
+        case ttsEngine
     }
 
     init(from decoder: Decoder) throws {
@@ -355,6 +376,9 @@ struct SettingsResponse: Decodable, Equatable {
         passwordAuthEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordAuthEnabled)
         passkeysEnabled = container.decodeLossyBoolIfPresent(forKey: .passkeysEnabled)
         passwordlessEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordlessEnabled)
+        // Preferences must be strings; malformed values behave like omitted settings.
+        ttsVoice = try? container.decode(String.self, forKey: .ttsVoice)
+        ttsEngine = try? container.decode(String.self, forKey: .ttsEngine)
     }
 }
 
@@ -676,6 +700,12 @@ struct ModelCatalogGroup: Identifiable, Equatable, Sendable {
     let providerID: String?
     let models: [ModelCatalogOption]
     let extraModels: [ModelCatalogOption]
+    /// All models in the group, including the overflow tail the server
+    /// exposes as `extra_models` (visible `models` + searchable `extraModels`),
+    /// de-duplicated by `id` to keep ForEach identity unique. Stored rather
+    /// than computed because the picker reads it many times per body pass, and
+    /// OpenRouter or Nous tails run to hundreds of models.
+    let allModels: [ModelCatalogOption]
 
     init(
         id: String,
@@ -689,6 +719,8 @@ struct ModelCatalogGroup: Identifiable, Equatable, Sendable {
         self.providerID = providerID
         self.models = models
         self.extraModels = extraModels
+        var seen = Set<String>()
+        self.allModels = (models + extraModels).filter { seen.insert($0.id).inserted }
     }
 
     init(
@@ -704,18 +736,6 @@ struct ModelCatalogGroup: Identifiable, Equatable, Sendable {
             models: models,
             extraModels: []
         )
-    }
-}
-
-extension ModelCatalogGroup {
-    /// All models in the group, including the overflow tail the server
-    /// exposes as `extra_models` (visible `models` + searchable `extraModels`).
-    /// `slashAutocompleteModels` was the old name — it happens to be the same
-    /// set, but the concept is broader than one consumer. De-duplicated by `id`
-    /// to keep ForEach identity unique.
-    var allModels: [ModelCatalogOption] {
-        var seen = Set<String>()
-        return (models + extraModels).filter { seen.insert($0.id).inserted }
     }
 }
 

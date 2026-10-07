@@ -966,14 +966,24 @@ struct BottomComposerMaterialFade: View {
     }
 }
 
+/// Transcript chip shown while the active stream is being checked,
+/// reconnected, or waiting for the network. It spins while work is under way,
+/// or shows a static dot under Reduce Motion. Waiting for the network always
+/// shows the dot: nothing happens until the network returns.
 struct StreamRecoveryStatusView: View {
     let state: ActiveStreamRecoveryState
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
+            if reduceMotion || state == .waitingForNetwork {
+                ChatRunStatusDot()
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityHidden(true)
+            }
 
             Text(label)
                 .font(.caption.weight(.semibold))
@@ -1000,6 +1010,8 @@ struct StreamRecoveryStatusView: View {
             return String(localized: "Checking stream")
         case .reconnecting:
             return String(localized: "Reconnecting stream")
+        case .waitingForNetwork:
+            return String(localized: "Waiting for network")
         }
     }
 }
@@ -1158,6 +1170,10 @@ struct ChatOfflineCacheBanner: View {
     }
 }
 
+/// Notices pinned above the composer during a run, such as the goal-set
+/// confirmation. Each card stops at two lines so a long goal never hides the
+/// live transcript (#772); VoiceOver reads every notice in full, and the run's
+/// end flushes them whole into the transcript.
 struct PinnedLocalNoticeStack: View {
     let notices: [String]
 
@@ -1169,9 +1185,10 @@ struct PinnedLocalNoticeStack: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(Color.green)
 
-                    Text(notice)
+                    Text(Self.plainText(notice))
                         .font(.footnote)
                         .foregroundStyle(.primary)
+                        .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1187,6 +1204,14 @@ struct PinnedLocalNoticeStack: View {
         .frame(maxWidth: .infinity)
         .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(notices.joined(separator: "\n"))
+        .accessibilityLabel(notices.map(Self.plainText).joined(separator: "\n"))
+    }
+
+    /// A notice without the code fences a host command's output comes in (#1036): the card
+    /// is plain text, and the transcript renders the fences once the run ends.
+    static func plainText(_ notice: String) -> String {
+        notice.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("```") }
+            .joined(separator: "\n")
     }
 }

@@ -2,6 +2,13 @@ import SwiftUI
 
 struct MessageBubbleView: View {
     @State private var responseIsVisible = false
+    /// A long user bubble's fold, measured by `measureUserBubbleFold`. Only
+    /// `UserBubbleFoldPolicy.mayFold` candidates are ever measured.
+    @State private var userBubbleFold: UserBubbleFold?
+    /// Show more and Show less. It survives scrolling, which keeps row
+    /// identity, and resets when the chat reopens.
+    @State private var userBubbleIsExpanded = false
+    @Environment(\.chatDisclosureToggled) private var chatDisclosureToggled
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.layoutDirection) private var layoutDirection
@@ -20,6 +27,8 @@ struct MessageBubbleView: View {
     let loadAttachmentData: ((String) async -> Data?)?
     let loadTranscriptMediaImage: ((TranscriptMediaReference) async -> Data?)?
     let loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)?
+    /// Server (and session) identity for in-memory image caches. Required so
+    /// attachment thumbnails and transcript media cannot share an empty bucket.
     let transcriptMediaCacheNamespace: String
     let localAttachmentPreviews: [String: Data]?
     let onPreviewAttachment: ((MessageAttachment, Data?) -> Void)?
@@ -29,7 +38,7 @@ struct MessageBubbleView: View {
     let onAskHermex: (String) -> Void
     /// Long-press actions, attached to the message content only so the empty
     /// gutter beside a user bubble does not open its menu.
-    let contextMenu: ChatMessageActionMenu?
+    let contextMenuActions: [ChatMessageActionItem]
 
     init(
         message: ChatMessage,
@@ -37,14 +46,14 @@ struct MessageBubbleView: View {
         loadAttachmentData: ((String) async -> Data?)? = nil,
         loadTranscriptMediaImage: ((TranscriptMediaReference) async -> Data?)? = nil,
         loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)? = nil,
-        transcriptMediaCacheNamespace: String = "",
+        transcriptMediaCacheNamespace: String,
         localAttachmentPreviews: [String: Data]? = nil,
         onPreviewAttachment: ((MessageAttachment, Data?) -> Void)? = nil,
         onPreviewTranscriptMedia: ((TranscriptMediaReference) -> Void)? = nil,
         isStreaming: Bool = false,
         liveTokensPerSecond: Double? = nil,
         onAskHermex: @escaping (String) -> Void = { _ in },
-        contextMenu: ChatMessageActionMenu? = nil,
+        contextMenuActions: [ChatMessageActionItem] = [],
         textOnly: Bool = false
     ) {
         self.textOnly = textOnly
@@ -60,7 +69,7 @@ struct MessageBubbleView: View {
         self.isStreaming = isStreaming
         self.liveTokensPerSecond = liveTokensPerSecond
         self.onAskHermex = onAskHermex
-        self.contextMenu = contextMenu
+        self.contextMenuActions = contextMenuActions
     }
 
     var body: some View {
@@ -68,6 +77,8 @@ struct MessageBubbleView: View {
             localNoticeRow
         } else if isLocalAssistant {
             localAssistantRow
+        } else if message.isSteerMessage {
+            steerBubble
         } else if isUserMessage {
             userMessageRow
         } else if textOnly {
@@ -79,7 +90,14 @@ struct MessageBubbleView: View {
     }
 
     private var userMessageRow: some View {
-        VStack(alignment: .trailing, spacing: 8) {
+        let previewURL = linkPreviewURL
+        let text = userBubbleText
+        let hasVisibleText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let bodyFont = userBubbleBodyFont
+        let mayFold = hasVisibleText && UserBubbleFoldPolicy.mayFold(text: text, font: bodyFont)
+        let folds = mayFold && userBubbleFold?.folds(text, at: dynamicTypeSize) == true
+
+        return VStack(alignment: .trailing, spacing: 8) {
             if !textOnly, let attachments = message.attachments, !attachments.isEmpty {
                 attachmentPreviews
             }
@@ -87,26 +105,101 @@ struct MessageBubbleView: View {
             // When the attachment-path line is hidden, an attachment-only
             // message has no bubble text left; skip the empty pill so only the
             // attachment grid shows.
-            if hasVisibleUserBubbleText || hasLinkPreview {
+            if hasVisibleText || previewURL != nil {
                 HStack(alignment: .bottom, spacing: 0) {
                     Spacer(minLength: userBubbleLeadingGutter)
                     VStack(alignment: .trailing, spacing: 8) {
-                        if hasVisibleUserBubbleText {
-                            userBubble
+                        if hasVisibleText {
+                            userBubble(text: text, folds: folds, bodyFont: bodyFont)
                         }
-                        linkPreview
+                        linkPreview(previewURL)
                     }
-                    .chatMessageContextMenu(contextMenu)
+                    .chatMessageContextMenu(contextMenuActions)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+        .background {
+            // Only a fold candidate reads its width, and it measures again only
+            // for a new width, text size or text, so scrolling never measures.
+            if mayFold {
+                Color.clear
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth in
+                        measureUserBubbleFold(text, rowWidth: rowWidth, bodyFont: bodyFont)
+                    }
+                    .onChange(of: text) {
+                        measureUserBubbleFold(text, rowWidth: userBubbleFold?.rowWidth, bodyFont: bodyFont)
+                    }
+                    .onChange(of: dynamicTypeSize) {
+                        measureUserBubbleFold(text, rowWidth: userBubbleFold?.rowWidth, bodyFont: bodyFont)
+                    }
+            }
+        }
+    }
+
+    /// Counts a candidate's wrapped lines in its text column: the row less the
+    /// leading gutter and the bubble's side padding.
+    private func measureUserBubbleFold(_ text: String, rowWidth: CGFloat?, bodyFont: UIFont) {
+        guard let rowWidth else { return }
+        let lineCount = UserBubbleFoldPolicy.lineCount(
+            text: text,
+            width: rowWidth - userBubbleLeadingGutter - 2 * Self.userBubbleHorizontalPadding,
+            font: bodyFont,
+            limit: UserBubbleFoldPolicy.maximumUnfoldedLines + 1
+        )
+        userBubbleFold = UserBubbleFold(
+            text: text,
+            rowWidth: rowWidth,
+            dynamicTypeSize: dynamicTypeSize,
+            wrapsPastLimit: UserBubbleFoldPolicy.folds(lineCount: lineCount)
+        )
+    }
+
+    /// A mid-turn steering hint: compact and visually distinct from the user's
+    /// own messages, with the server's out-of-band wrapper stripped. Steer
+    /// rows are annotations on the active turn, not user-editable content, so
+    /// they carry no context menu or meta row.
+    private var steerBubble: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Label {
+                Text("Steer")
+                    .font(.caption.weight(.semibold))
+            } icon: {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+
+            if !message.steerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(message.steerText)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.12),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(
+                                Color.accentColor.opacity(colorScheme == .dark ? 0.45 : 0.3),
+                                lineWidth: 0.5
+                            )
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(localized: "Steering hint"))
+        .accessibilityValue(message.steerText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private var assistantMessageRow: some View {
-        let segments = TranscriptMediaParser.segments(
+        let segments = TranscriptMediaSegmentCache.segments(
             in: messageText,
-            workspaceRoot: chatWorkspaceRoot
+            workspaceRoot: chatWorkspaceRoot,
+            isStreaming: isStreaming
         )
 
         return VStack(alignment: .leading, spacing: 6) {
@@ -126,7 +219,7 @@ struct MessageBubbleView: View {
                 } action: { responseIsVisible = $0 }
             }
 
-            linkPreview
+            linkPreview(linkPreviewURL)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // While this row is the active streaming message, animate its height
@@ -234,6 +327,8 @@ struct MessageBubbleView: View {
 
             MarkdownRenderer(content: messageText, isStreaming: isStreaming)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // The card's material is translucent, so no solid fade matches it.
+                .environment(\.markdownTableEdgeFadeColor, nil)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
@@ -246,33 +341,79 @@ struct MessageBubbleView: View {
     }
 
     /// The sent message, with any skill reference drawn as the same chip the
-    /// composer showed before the send.
+    /// composer showed before the send. A long one `folds` to its first
+    /// `UserBubbleFoldPolicy.visibleLines` behind Show more.
     ///
     /// A chip is a picture, so dragging a selection across one leaves its
-    /// `/slug` out of what is copied; the message's own Copy and Select Text
-    /// actions read `message.content`, which is always the exact text.
-    private var userBubble: some View {
-        let text = userBubbleText
+    /// `/slug` out of what is copied; the message's own Copy action reads
+    /// `message.content`, which is always the exact text, folded or not.
+    private func userBubble(text: String, folds: Bool, bodyFont: UIFont) -> some View {
         let chips = textOnly ? [] : userBubbleChips(in: text)
+        let isFolded = folds && !userBubbleIsExpanded
 
-        return ComposerChipTextLine.text(text, tokens: chips, style: chipStyle)
-            .font(.body)
-            .textSelection(.enabled)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(userBubbleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .foregroundStyle(userBubbleForeground)
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(userBubbleBorder, lineWidth: 0.5)
-            )
-            // VoiceOver reads a chip by its skill's name rather than announcing
-            // an image, the way both composer states already do.
-            .accessibilityLabel(
-                chips.isEmpty
-                    ? Text(verbatim: text)
-                    : Text(verbatim: ComposerChipTokenizer.spokenText(in: text, tokens: chips))
-            )
+        return VStack(alignment: .leading, spacing: 6) {
+            ComposerChipTextLine.text(text, tokens: chips, style: chipStyle)
+                .font(.body)
+                .lineLimit(isFolded ? UserBubbleFoldPolicy.visibleLines : nil)
+                .textSelection(.enabled)
+                .overlay(alignment: .bottom) {
+                    // The bubble is a solid colour, so a gradient into it fades
+                    // the last line with no mask or offscreen pass.
+                    if isFolded {
+                        LinearGradient(
+                            colors: [userBubbleBackground.opacity(0), userBubbleBackground],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: bodyFont.lineHeight)
+                        .allowsHitTesting(false)
+                    }
+                }
+                // VoiceOver reads the whole message, folded or not, and a chip
+                // by its skill's name rather than announcing an image, the way
+                // both composer states already do.
+                .accessibilityLabel(
+                    chips.isEmpty
+                        ? Text(verbatim: text)
+                        : Text(verbatim: ComposerChipTokenizer.spokenText(in: text, tokens: chips))
+                )
+
+            if folds {
+                userBubbleFoldToggle
+            }
+        }
+        .padding(.horizontal, Self.userBubbleHorizontalPadding)
+        .padding(.vertical, 8)
+        .background(userBubbleBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .foregroundStyle(userBubbleForeground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(userBubbleBorder, lineWidth: 0.5)
+        )
+    }
+
+    /// Show more and Show less, at the bubble's leading edge under the text.
+    /// Instant, like the diff block's Show all, so there is no motion to reduce.
+    private var userBubbleFoldToggle: some View {
+        Button {
+            // Pins the reader's offset while the bubble grows or shrinks.
+            chatDisclosureToggled()
+            userBubbleIsExpanded.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                if userBubbleIsExpanded {
+                    Text("Show less")
+                } else {
+                    Text("Show more")
+                }
+                Image(systemName: userBubbleIsExpanded ? "chevron.up" : "chevron.down")
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline.weight(.semibold))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.chatTactile(.compactControl))
+        .foregroundStyle(.tint)
     }
 
     /// The references in a sent message. `isComplete` is what a send means: the
@@ -294,24 +435,29 @@ struct MessageBubbleView: View {
         )
     }
 
+    /// Read once per row body; the user row needs it both to decide whether to
+    /// draw the bubble stack and to draw the preview inside it.
+    private var linkPreviewURL: URL? {
+        guard !textOnly else { return nil }
+        return TranscriptLinkPreviewEligibility.previewURL(for: message, isStreaming: isStreaming)
+    }
+
     @ViewBuilder
-    private var linkPreview: some View {
-        if !textOnly, let url = TranscriptLinkPreviewEligibility.previewURL(for: message, isStreaming: isStreaming) {
+    private func linkPreview(_ url: URL?) -> some View {
+        if let url {
             TranscriptLinkPreviewView(url: url)
                 .frame(maxWidth: 300)
         }
     }
 
-    private var hasLinkPreview: Bool {
-        !textOnly && TranscriptLinkPreviewEligibility.previewURL(for: message, isStreaming: isStreaming) != nil
-    }
-
     // Audio attachments render as full-width Telegram-style player bars stacked
-    // above the square image/file grid; everything else stays in the grid.
+    // above the square image/file grid; everything else stays in the grid. With
+    // no way to load the bytes (a Hermes session's chips), audio stays a file cell.
     private var attachmentPreviews: some View {
         let allItems = attachmentsWithPreviews
-        let audioItems = allItems.filter { $0.attachment.inferredIsAudio }
-        let gridItems = allItems.filter { !$0.attachment.inferredIsAudio }
+        let playsAudio = loadAttachmentData != nil
+        let audioItems = allItems.filter { playsAudio && $0.attachment.inferredIsAudio }
+        let gridItems = allItems.filter { !playsAudio || !$0.attachment.inferredIsAudio }
         let columns = 2
         let spacing: CGFloat = 8
         let cellSize: CGFloat = 118
@@ -343,7 +489,7 @@ struct MessageBubbleView: View {
             }
         }
         // Before the full-width frame, so the marker covers the grid only.
-        .chatMessageContextMenu(contextMenu)
+        .chatMessageContextMenu(contextMenuActions)
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
@@ -364,6 +510,7 @@ struct MessageBubbleView: View {
                         GridAttachmentCell(
                             attachment: item.attachment,
                             localData: item.localData,
+                            cacheNamespace: transcriptMediaCacheNamespace,
                             loadAttachmentImage: loadAttachmentImage,
                             onPreviewAttachment: onPreviewAttachment,
                             size: cellSize
@@ -434,6 +581,16 @@ struct MessageBubbleView: View {
         dynamicTypeSize.isAccessibilitySize ? 20 : 32
     }
 
+    private static let userBubbleHorizontalPadding: CGFloat = 14
+
+    /// The body font at this view's text size, for measuring the fold.
+    private var userBubbleBodyFont: UIFont {
+        UIFont.preferredFont(
+            forTextStyle: .body,
+            compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(dynamicTypeSize))
+        )
+    }
+
     private var userBubbleBackground: Color {
         colorScheme == .dark ? Color(.systemGray3) : Color(.systemGray6)
     }
@@ -464,9 +621,19 @@ struct MessageBubbleView: View {
         guard !textOnly, hidesAttachmentPaths else { return content }
         return MessageAttachment.contentWithoutAttachedFilesMarker(in: content)
     }
+}
 
-    private var hasVisibleUserBubbleText: Bool {
-        !userBubbleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+/// A user bubble's measured fold and what it was measured for. A new text or
+/// text size leaves it stale until `measureUserBubbleFold` runs again, and a
+/// stale one never folds.
+private struct UserBubbleFold {
+    let text: String
+    let rowWidth: CGFloat
+    let dynamicTypeSize: DynamicTypeSize
+    let wrapsPastLimit: Bool
+
+    func folds(_ text: String, at dynamicTypeSize: DynamicTypeSize) -> Bool {
+        wrapsPastLimit && dynamicTypeSize == self.dynamicTypeSize && text == self.text
     }
 }
 
@@ -484,6 +651,7 @@ private extension [TranscriptMediaSegment] {
 private struct GridAttachmentCell: View {
     let attachment: MessageAttachment
     let localData: Data?
+    let cacheNamespace: String
     let loadAttachmentImage: ((String) async -> Data?)?
     let onPreviewAttachment: ((MessageAttachment, Data?) -> Void)?
     let size: CGFloat
@@ -544,6 +712,7 @@ private struct GridAttachmentCell: View {
             } else if let path = resolvedPath, let loadAttachmentImage {
                 RemoteAttachmentImage(
                     path: path,
+                    cacheNamespace: cacheNamespace,
                     loadAttachmentImage: loadAttachmentImage
                 )
                 .frame(width: size, height: size)
@@ -671,9 +840,11 @@ private struct GridAttachmentCell: View {
 
 /// Loads attachment images through the authenticated `APIClient` instead of
 /// `AsyncImage`, which uses `URLSession.shared` and may not carry our auth
-/// cookie. Deduplicates concurrent requests and caches in memory.
+/// cookie. `TranscriptImageCache` deduplicates concurrent requests and keeps
+/// the thumbnails in memory.
 private struct RemoteAttachmentImage: View {
     let path: String
+    let cacheNamespace: String
     let loadAttachmentImage: (String) async -> Data?
     @State private var image: UIImage?
     @State private var didAttempt = false
@@ -690,17 +861,23 @@ private struct RemoteAttachmentImage: View {
                 fallbackImage
             }
         }
-        .task(id: path) {
-            let loaded = await AttachmentImageCache.shared.image(
-                for: path,
-                loadAttachmentImage: loadAttachmentImage
-            )
+        .task(id: imageCacheKey) {
+            image = nil
+            didAttempt = false
+            let path = path
+            let loaded = await TranscriptImageCache.shared.image(forKey: imageCacheKey.cacheKey) {
+                await loadAttachmentImage(path)
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.image = loaded
                 self.didAttempt = true
             }
         }
+    }
+
+    private var imageCacheKey: AttachmentImageCacheKey {
+        AttachmentImageCacheKey(namespace: cacheNamespace, path: path)
     }
 
     private var fallbackImage: some View {
@@ -723,45 +900,17 @@ private struct RemoteAttachmentImage: View {
     }
 }
 
-/// In-memory image cache that delegates loading to the authenticated client.
-/// Deduplicates concurrent requests for the same path.
-private actor AttachmentImageCache {
-    static let shared = AttachmentImageCache()
+/// Identifies an attachment thumbnail in `TranscriptImageCache`. The cache is
+/// process-wide and survives `.id(server)` teardown, so keys include the
+/// server (and session) namespace rather than the relative path alone.
+struct AttachmentImageCacheKey: Hashable {
+    let namespace: String
+    let path: String
 
-    private var cache: [String: UIImage] = [:]
-    private var inFlight: [String: Task<UIImage?, Never>] = [:]
-
-    func image(
-        for path: String,
-        loadAttachmentImage: @escaping (String) async -> Data?
-    ) async -> UIImage? {
-        if let cached = cache[path] {
-            return cached
-        }
-
-        if let task = inFlight[path] {
-            return await task.value
-        }
-
-        let task = Task<UIImage?, Never> {
-            guard let data = await loadAttachmentImage(path) else {
-                return nil
-            }
-            let previewData = ImagePreviewDownsampler.previewData(
-                from: data,
-                maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
-            ) ?? data
-            return UIImage(data: previewData)
-        }
-
-        inFlight[path] = task
-        let image = await task.value
-        inFlight[path] = nil
-
-        if let image {
-            cache[path] = image
-        }
-        return image
+    /// The shared cache's key. The kind prefix keeps it apart from media keys;
+    /// the length prefix keeps the namespace boundary fixed.
+    var cacheKey: String {
+        "attachment|\(namespace.utf8.count)|\(namespace)|\(path)"
     }
 }
 

@@ -8,6 +8,7 @@ struct OnboardingView: View {
     @State private var hasBypassedCopyReminder = false
     @State private var isShowingCopyReminder = false
     @FocusState private var focusedField: OnboardingConnectField?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(authManager: AuthManager, savedServer: URL? = nil) {
         self.authManager = authManager
@@ -31,7 +32,7 @@ struct OnboardingView: View {
         currentPage == OnboardingFlowPolicy.connectPageIndex && focusedField != nil
     }
 
-    private var canSubmitConnection: Bool {
+    private var hasServerURL: Bool {
         !viewModel.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -68,10 +69,10 @@ struct OnboardingView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if isEditingConnectionField {
                 keyboardActionBar
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: isEditingConnectionField)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isEditingConnectionField)
         .preferredColorScheme(.dark)
         .onChange(of: currentPage) { oldPage, newPage in
             handlePageChange(from: oldPage, to: newPage)
@@ -172,7 +173,7 @@ struct OnboardingView: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(OnboardingSecondaryButtonStyle())
-        .disabled(viewModel.isWorking || !canSubmitConnection)
+        .disabled(viewModel.isWorking || !hasServerURL)
     }
 
     private var connectButton: some View {
@@ -183,7 +184,7 @@ struct OnboardingView: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(OnboardingPrimaryButtonStyle())
-        .disabled(viewModel.isWorking || !canSubmitConnection)
+        .disabled(viewModel.isWorking || !viewModel.canSubmit)
     }
 
     private func handlePrimaryAction() {
@@ -221,13 +222,13 @@ struct OnboardingView: View {
 
     private func advanceToNextPage() {
         guard currentPage < OnboardingFlowPolicy.connectPageIndex else { return }
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
             currentPage += 1
         }
     }
 
     private func jumpToConnectPage() {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) {
             currentPage = OnboardingFlowPolicy.connectPageIndex
         }
     }

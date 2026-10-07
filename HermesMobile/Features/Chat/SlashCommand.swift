@@ -61,6 +61,8 @@ enum ServerSideAction: String, Equatable, Sendable {
     case btw
     case background
     case goal
+    /// A Hermes chat's approval bypass (#1036).
+    case yolo
 }
 
 enum SlashCommandSubArgs: Equatable, Sendable {

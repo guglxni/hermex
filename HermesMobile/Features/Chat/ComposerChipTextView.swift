@@ -4,9 +4,71 @@ import UniformTypeIdentifiers
 /// The composer's editor: a text view that draws known skill references as
 /// atomic chips while every value that leaves it stays the draft's own text.
 final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
+    private var pendingTransitionFocus: UUID?
+
+    /// The owner's current focus intent, read when a deferred focus is about to
+    /// land. UIKit's own restoration can re-request focus after a bound blur in
+    /// the same pop (#831), so a cancel alone cannot guarantee the blur wins.
+    var wantsDeferredFocus: () -> Bool = { true }
+
+    /// UIKit re-promotes the last editor while a navigation pop is still animating,
+    /// before SwiftUI's keyboard safe area can follow, which leaves the composer
+    /// behind the keyboard (#810). Defer focus until the transition finishes.
+    override func becomeFirstResponder() -> Bool {
+        guard let coordinator = owningViewController?.transitionCoordinator else {
+            cancelDeferredFocus()
+            return super.becomeFirstResponder()
+        }
+        if pendingTransitionFocus == nil {
+            let request = UUID()
+            pendingTransitionFocus = request
+            coordinator.animate(alongsideTransition: nil) { [weak self] context in
+                guard let self, pendingTransitionFocus == request else { return }
+                pendingTransitionFocus = nil
+                guard !context.isCancelled, window != nil, wantsDeferredFocus() else { return }
+                _ = becomeFirstResponder()
+            }
+        }
+        return false
+    }
+
+    /// Blur can arrive before UIKit has made this editor first responder.
+    func cancelDeferredFocus() {
+        pendingTransitionFocus = nil
+    }
+
+    override func resignFirstResponder() -> Bool {
+        cancelDeferredFocus()
+        return super.resignFirstResponder()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancelDeferredFocus() }
+    }
+
+    /// Navigation temporarily resigns the editor without changing the user's
+    /// focus intent. Preserve that intent so the return can restore it.
+    var isInNavigationTransition: Bool {
+        owningViewController?.navigationController?.transitionCoordinator != nil
+    }
+
+    private var owningViewController: UIViewController? {
+        var responder: UIResponder? = next
+        while let current = responder {
+            if let controller = current as? UIViewController { return controller }
+            responder = current.next
+        }
+        return nil
+    }
+
     var acceptsAttachments = true
     var isKeyboardSendEnabled = false
     var onKeyboardSend: () -> Void = {}
+    /// The chat's last sent message, which ↑ brings back into an empty editor
+    /// on a hardware keyboard. Nil where there is no single author to recall
+    /// (Bot rooms), which leaves ↑ to move the caret.
+    var recallLastSentText: (() -> String?)?
     var onPasteFileProviders: ([NSItemProvider]) -> Void = { _ in }
     var onPasteFileURLs: ([URL]) -> Void = { _ in }
     var onPasteImageProviders: ([NSItemProvider]) -> Void = { _ in }
@@ -34,6 +96,14 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
     var chipFilePaths: Set<String> = [] {
         didSet {
             guard chipFilePaths != oldValue else { return }
+            rebuildChipCatalog()
+        }
+    }
+
+    /// Resolvable bot aliases from this composer's connection, including avatars.
+    var chipBots: [String: ComposerBotReference] = [:] {
+        didSet {
+            guard chipBots != oldValue else { return }
             rebuildChipCatalog()
         }
     }
@@ -104,6 +174,27 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
         }
     }
 
+    /// Applies the SwiftUI-owned direction and enabled appearance without
+    /// rewriting text attributes on every representable update. A redundant
+    /// alignment or colour assignment invalidates UITextView layout and can
+    /// reveal the caret after the user has manually scrolled elsewhere.
+    func applyPresentationStyle(isRightToLeft: Bool, isDisabled: Bool) {
+        let semanticAttribute: UISemanticContentAttribute = isRightToLeft ? .forceRightToLeft : .unspecified
+        if semanticContentAttribute != semanticAttribute {
+            semanticContentAttribute = semanticAttribute
+        }
+
+        let alignment: NSTextAlignment = isRightToLeft ? .right : .natural
+        if textAlignment != alignment {
+            textAlignment = alignment
+        }
+
+        let color: UIColor = isDisabled ? .secondaryLabel : .label
+        if textColor != color {
+            textColor = color
+        }
+    }
+
     /// UIKit may place a caret on the zero-source quote prefix after a chip tap.
     /// Map it back through draft coordinates so typing always starts after the
     /// quote metadata.
@@ -139,7 +230,7 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
     }
 
     private func rebuildChipCatalog() {
-        chipCatalog = ComposerChipCatalog(skills: chipSkills, filePaths: chipFilePaths)
+        chipCatalog = ComposerChipCatalog(skills: chipSkills, filePaths: chipFilePaths, bots: chipBots)
     }
 
     @objc private func handleChipTap(_ recognizer: UITapGestureRecognizer) {
@@ -213,11 +304,14 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
 
     /// Replaces the whole draft, chips and all. The fallback for an edit the
     /// input system could not apply in place, and for a deliberate clear.
-    func replaceDocument(with source: String) {
+    /// `isComplete` draws a reference that ends the text as a chip, the way the
+    /// transcript draws a sent message.
+    func replaceDocument(with source: String, isComplete: Bool = false) {
         let tokens = ComposerChipTokenizer.tokens(
             in: source,
             catalog: chipCatalog,
-            preservingTrailing: renderedTokens
+            preservingTrailing: renderedTokens,
+            isComplete: isComplete
         )
         render(
             source: source,
@@ -462,12 +556,27 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
             input: ComposerKeyboardCommand.input,
             modifierFlags: ComposerKeyboardCommand.modifierFlags
         )
-        return (super.keyCommands ?? []) + [sendCommand]
+        guard recallLastSentText != nil else {
+            return (super.keyCommands ?? []) + [sendCommand]
+        }
+        let recallCommand = UIKeyCommand(
+            title: ComposerRecall.commandTitle,
+            action: #selector(recallLastSentTextFromKeyboard),
+            input: UIKeyCommand.inputUpArrow,
+            modifierFlags: []
+        )
+        // Arrow keys go to text editing first otherwise.
+        recallCommand.wantsPriorityOverSystemBehavior = true
+        return (super.keyCommands ?? []) + [sendCommand, recallCommand]
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(sendMessageFromKeyboard) {
             return isKeyboardSendEnabled
+        }
+
+        if action == #selector(recallLastSentTextFromKeyboard) {
+            return recallableText != nil
         }
 
         if action == #selector(paste(_:)), !acceptsAttachments {
@@ -484,6 +593,38 @@ final class ComposerChipTextView: UITextView, UIGestureRecognizerDelegate {
     @objc private func sendMessageFromKeyboard() {
         guard isKeyboardSendEnabled else { return }
         onKeyboardSend()
+    }
+
+    /// What ↑ would bring back. Only an empty editor takes it, so ↑ inside a
+    /// draft, or with a quote staged, keeps moving the caret.
+    private var recallableText: String? {
+        guard isEditable, quotes.isEmpty, textStorage.length == 0,
+              let text = recallLastSentText?(), !text.isEmpty
+        else {
+            return nil
+        }
+        return text
+    }
+
+    /// Fills the empty editor with the last sent message as one undoable edit:
+    /// chips drawn as its bubble draws them, the caret at the end, and the
+    /// draft published like typing. Drawing chips replaces the document and
+    /// clears the undo stack, so the undo that empties the editor again is
+    /// registered here rather than left to the input system.
+    @objc private func recallLastSentTextFromKeyboard() {
+        guard let text = recallableText else { return }
+
+        replaceDocument(with: text, isComplete: true)
+        delegate?.textViewDidChange?(self)
+
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { textView in
+            let draft = NSRange(location: 0, length: (textView.sourceText as NSString).length)
+            guard let range = textView.displayTextRange(forSourceRange: draft) else { return }
+            textView.replace(range, withText: "")
+        }
+        undoManager.endUndoGrouping()
     }
 
     override func paste(_ sender: Any?) {

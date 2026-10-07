@@ -1,20 +1,53 @@
 import SwiftUI
 import UIKit
-import PhotosUI
+
+/// A composer status line that offers Retry, such as "Couldn't steer".
+struct ComposerRetryableStatus {
+    let message: String
+    let onRetry: () -> Void
+}
 
 private struct ComposerStatusView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let text: String
     let isError: Bool
     let isDismissible: Bool
+    let onRetry: (() -> Void)?
+    /// Offers Copy fix prompt, which puts this text on the pasteboard (#955).
+    let fixPrompt: String?
+    /// Offers Cancel, which stops a Hermes send's uploads (#1012).
+    let onCancel: (() -> Void)?
     let onDismiss: () -> Void
+    @State private var didCopyFixPrompt = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        // At accessibility sizes Copy fix prompt drops below the message,
+        // like the transcript log rows' stacked labels.
+        let layout = fixPrompt != nil && dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 8))
+        layout {
             Text(text)
                 .font(AppFont.caption())
                 .foregroundStyle(textColor)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let onRetry {
+                Button("Retry", action: onRetry)
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.borderless)
+            }
+
+            if let onCancel {
+                Button("Cancel", action: onCancel)
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.borderless)
+            }
+
+            if let fixPrompt {
+                fixPromptButton(fixPrompt)
+            }
 
             if isDismissible {
                 Button(action: onDismiss) {
@@ -38,6 +71,30 @@ private struct ComposerStatusView: View {
                 .stroke(borderColor, lineWidth: 0.5)
         )
         .padding(.horizontal, 16)
+        .onChange(of: text) { didCopyFixPrompt = false }
+    }
+
+    /// Swaps to "Copied" without animation and announces it for VoiceOver.
+    private func fixPromptButton(_ prompt: String) -> some View {
+        Button {
+            UIPasteboard.general.string = prompt
+            didCopyFixPrompt = true
+            AccessibilityNotification.Announcement(String(localized: "Fix prompt copied")).post()
+        } label: {
+            if didCopyFixPrompt {
+                Label("Copied", systemImage: "checkmark")
+                    .labelStyle(.titleAndIcon)
+            } else {
+                Text("Copy fix prompt")
+            }
+        }
+        .font(AppFont.caption(weight: .semibold))
+        .buttonStyle(.borderless)
+        // Wraps like Retry would: a long translation shares the row with the
+        // message instead of squeezing it, and never overflows when stacked.
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(didCopyFixPrompt ? Text("Fix prompt copied") : Text("Copy fix prompt"))
+        .accessibilityHint(Text("Copies a prompt that asks your Hermes agent to restart Hermes WebUI."))
     }
 
     private var textColor: Color {
@@ -89,6 +146,7 @@ struct MessageComposerView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @ScaledMetric(relativeTo: .body) private var actionIconSize: CGFloat = 16
     @ScaledMetric(relativeTo: .body) private var plusIconSize: CGFloat = 20
 
@@ -97,6 +155,9 @@ struct MessageComposerView: View {
     private let circleSize = ChatComposerMetrics.actionSize
     private let pillInset = ChatComposerMetrics.pillInset
 
+    /// The draft. Pass the owner's plain `$state`, not a get/set binding:
+    /// SwiftUI re-runs the owner of a get/set binding on every keystroke. The
+    /// owner hears about edits through `onDraftEdit` instead.
     @Binding var draftMessage: String
     @Binding var quotes: [ComposerQuote]
     @Binding var isFocused: Bool
@@ -106,6 +167,8 @@ struct MessageComposerView: View {
     let isCancellingStream: Bool
     let readOnlyMessage: String?
     let errorMessage: String?
+    /// Offered as Copy fix prompt on the `errorMessage` banner (#955).
+    let errorFixPrompt: String?
     let configurationErrorMessage: String?
     let contextWindowSnapshot: ContextWindowSnapshot?
     let gitViewModel: GitWorkspaceAvailabilityViewModel
@@ -157,7 +220,16 @@ struct MessageComposerView: View {
     /// again the first time the panel opens.
     let filePathSearch: ComposerFilePathSearch
     let uploadAttachmentErrorMessage: String?
+    /// "Couldn't steer" with Retry, after a steer didn't reach the run.
+    let steerFailure: ComposerRetryableStatus?
+    /// The Send While Responding default: what a tap on Send does mid-run, and
+    /// the glyph and VoiceOver label that say so.
+    let streamingSendBehavior: StreamingSendBehavior
+    /// Sends with the default; a mid-run send uses `streamingSendBehavior`.
     let onSend: () -> Void
+    /// Sends this one message with a behavior picked from the send-choice card
+    /// or a VoiceOver action. The default does not change.
+    let onSendWithBehavior: (StreamingSendBehavior) -> Void
     let onSendVoiceNote: (Data, String) -> Void
     let onCancel: () -> Void
     let onSelectModel: (ModelCatalogOption) -> Void
@@ -170,7 +242,7 @@ struct MessageComposerView: View {
     let onSelectWorkspace: (String) async -> Void
     let onSelectProfile: (ProfileSummary) -> Void
     let onHeightChange: (CGFloat) -> Void
-    let onPhotoItemSelected: (PhotosPickerItem) -> Void
+    let onPhotoMediaSelected: ([HermexPickedMedia]) -> Void
     let onFileURLsSelected: ([URL]) -> Void
     let onPasteFileProviders: ([NSItemProvider]) -> Void
     let onPasteFileURLs: ([URL]) -> Void
@@ -181,11 +253,46 @@ struct MessageComposerView: View {
     let onDismissUploadAttachmentError: () -> Void
     /// A workspace file the user just picked, for the chip catalog.
     let onSelectFileReference: (String) -> Void
+    /// The draft, each time its finished `@…` references change (and once on
+    /// appear), so the owner can confirm which name workspace files. Scanned
+    /// here because this view already re-runs per keystroke; the owner never
+    /// has to read the draft in its own body.
+    let onFileReferenceCandidatesChange: (String) async -> Void
+    /// Each edit the user makes to the draft here (typing, completions,
+    /// dictation), after it lands in `draftMessage`, for the owner to persist.
+    let onDraftEdit: (String) -> Void
+    /// The chat's last sent message, for ↑ in an empty composer on a hardware
+    /// keyboard. A closure, so the transcript is scanned only when ↑ is pressed.
+    var recallLastSentText: (() -> String?)? = nil
     /// A file chip the user tapped, by workspace-relative path.
     let onOpenFileReference: (String) -> Void
     let onSelectGitBranch: (GitCheckoutTarget) -> Void
     let onCreateGitBranch: (GitCheckoutTarget) -> Void
     let onRefreshGitBranches: () -> Void
+    /// False on a Hermes session (#1010): the workspace selector, the branch picker and voice
+    /// notes stay hidden until their phases land. The + menu, dictation and the context
+    /// indicator stay.
+    var showsSessionControls = true
+    /// The commands the `/` panel lists and runs: a Hermes chat's own and its host's (#1036).
+    var slashScope = SlashCommandScope.webui
+    /// The host's suggestions for a host command's argument (#1036).
+    var hostSlashCompletion: HermesSlashCompletion?
+    /// Asks the host to complete a host command's argument: the draft up to the caret, or nil
+    /// once the caret leaves one. Called again on each change; a newer call replaces it.
+    var onCompleteHostSlashArgument: (String?) async -> Void = { _ in }
+    /// A Hermes session's model and Profile chips (#1015), shown while the rest of
+    /// `showsSessionControls` stays hidden.
+    var showsModelAndProfileControls = false
+    /// A configuration change that has not landed yet, such as a model the host applies
+    /// after the running response. Shown below any configuration error.
+    var configurationNotice: String?
+    /// The effort a Hermes host sends when the model takes less than the one picked (#1016).
+    var sentReasoningEffort: String?
+    /// A Hermes session (#1012): staged files upload when they are sent, under Bot Chat's
+    /// rules. Up to eight, and Steer drops out while a response runs.
+    var uploadsAttachmentsOnSend = false
+    /// Set while a send uploads its files, for the status line's Cancel.
+    var onCancelAttachmentUpload: (() -> Void)?
 
     @State private var textFieldHeight: CGFloat = 0
     @State private var textInputHeight: CGFloat = 22
@@ -202,11 +309,16 @@ struct MessageComposerView: View {
     @State private var keyboardIsVisible = false
     @State private var shouldRestoreFocusAfterPresentation = false
     @State private var selectedQuote: ComposerQuote?
+    /// True while the send-choice card is up after a hold on Send mid-run.
+    @State private var choosingSendBehavior = false
+    /// Keeps the release of a hold that opened the card from also sending.
+    @State private var sendHold = ChatComposerSendHold()
+    @State private var sendHoldWorkItem: DispatchWorkItem?
+    @GestureState private var isPressingSend = false
 
     @State private var deferredUploadFocusPhase: DeferredUploadFocusPhase = .none
-    @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var showPhotoPicker = false
-    @State private var showCameraPicker = false
+    @State private var showMediaPicker = false
+    @State private var presentFilesAfterMediaPickerDismisses = false
     @State private var showFileImporter = false
     @State private var voiceInput = ComposerVoiceInputController()
     @State private var voiceNoteRecorder = ComposerVoiceNoteRecorder()
@@ -228,7 +340,15 @@ struct MessageComposerView: View {
     /// The `/…` the caret is sitting in, whether that is the start of the draft
     /// or the middle of a sentence.
     private var slashTrigger: ComposerSlashTrigger? {
-        ComposerSlashTrigger.detect(in: draftMessage, selection: composerSelection.range)
+        ComposerSlashTrigger.detect(in: draftMessage, selection: composerSelection.range, scope: slashScope)
+    }
+
+    /// The draft up to the caret while it is at a host command's argument (#1036), which the
+    /// host is asked to complete.
+    private var hostSlashArgumentText: String? {
+        guard fileTrigger == nil, let trigger = slashTrigger, trigger.startsDraft,
+              ParsedSlashQuery(query: trigger.text, scope: slashScope).isHostArgumentMode else { return nil }
+        return trigger.text
     }
 
     /// The `@…` the caret is sitting in, or `nil` when there is none.
@@ -263,12 +383,19 @@ struct MessageComposerView: View {
     /// `ComposerSlashTrigger` ends at the space after a command that takes no
     /// sub-argument — so besides the trigger itself, three things close the
     /// panel: a settled `/skills` invocation, a settled goal action, and a
-    /// mid-sentence word no loaded skill matches.
+    /// mid-sentence word no loaded skill matches. A Hermes chat's panel opens only at the
+    /// start of the draft, where its host runs a command, and at a host command's argument
+    /// only while the host has suggestions for it (#1036).
     private var slashQuery: String? {
         guard fileTrigger == nil, let query = slashTrigger?.text else { return nil }
 
-        let parsed = ParsedSlashQuery(query: query)
-        if parsed.commandName.lowercased() == "skills",
+        let parsed = ParsedSlashQuery(query: query, scope: slashScope)
+        if slashScope.isHermes {
+            guard slashTrigger?.startsDraft == true else { return nil }
+            if parsed.isHostArgumentMode,
+               hostSlashCompletion.map({ $0.items.isEmpty || !$0.applies(to: query) }) ?? true { return nil }
+        }
+        if parsed.command?.subArgs == .skills,
            SlashSkillFormatter.invocation(from: parsed.argQuery, suggestions: skillSuggestions) != nil {
             return nil
         }
@@ -307,14 +434,28 @@ struct MessageComposerView: View {
         !(slashTrigger?.startsDraft ?? true)
     }
 
+    /// Every write the user makes to the draft goes through here, so the owner
+    /// can persist it.
+    private func editDraft(_ text: String) {
+        draftMessage = text
+        onDraftEdit(text)
+    }
+
     /// Swaps the `/…` at the caret for `replacement` and leaves the caret just
     /// after it, so the rest of the draft survives accepting a row.
     private func applyCompletion(_ replacement: String) {
         guard let trigger = slashTrigger else { return }
 
         let completed = trigger.applying(replacement, to: draftMessage)
-        draftMessage = completed.draft
+        editDraft(completed.draft)
         composerSelection = composerSelection.moved(to: completed.selection)
+    }
+
+    /// A row the user tapped in the `/` panel: completes it with a selection
+    /// tick. Dismissing the panel calls `applyCompletion` directly, silently.
+    private func pickCompletion(_ replacement: String) {
+        applyCompletion(replacement)
+        ChatHaptics.autocompleteAccepted(isEnabled: isHapticsEnabled)
     }
 
     /// Swaps the `@…` at the caret for the picked entry.
@@ -323,7 +464,8 @@ struct MessageComposerView: View {
     /// editor draws it as a chip. A folder is a step on the way, so it inserts
     /// with a trailing `/` and no space and the panel stays open listing what is
     /// inside it. Only files are recorded, which is what keeps a folder
-    /// reference from becoming a chip that opens nothing.
+    /// reference from becoming a chip that opens nothing. Either pick plays a
+    /// selection tick, so a folder tap that keeps the panel open still lands.
     private func applyFileCompletion(_ match: ComposerFilePathSearch.Match) {
         guard let trigger = fileTrigger else { return }
 
@@ -331,16 +473,17 @@ struct MessageComposerView: View {
             match.isDirectory ? "@\(match.path)/" : "@\(match.path) ",
             to: draftMessage
         )
-        draftMessage = completed.draft
+        editDraft(completed.draft)
         composerSelection = composerSelection.moved(to: completed.selection)
 
         if !match.isDirectory {
             onSelectFileReference(match.path)
         }
+        ChatHaptics.autocompleteAccepted(isEnabled: isHapticsEnabled)
     }
 
     private var parsedSlashQuery: ParsedSlashQuery {
-        ParsedSlashQuery(query: slashQuery ?? "")
+        ParsedSlashQuery(query: slashQuery ?? "", scope: slashScope)
     }
 
     private var slashAutocompleteLoadKey: String {
@@ -366,7 +509,7 @@ struct MessageComposerView: View {
         }
     }
 
-    var body: some View {
+    private var composerWithLifecycle: some View {
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {
@@ -386,6 +529,9 @@ struct MessageComposerView: View {
                         text: composerStatus.text,
                         isError: composerStatus.isError,
                         isDismissible: composerStatus.isDismissible,
+                        onRetry: composerStatus.onRetry,
+                        fixPrompt: composerStatus.fixPrompt,
+                        onCancel: composerStatus.onCancel,
                         onDismiss: onDismissUploadAttachmentError
                     )
                 }
@@ -394,9 +540,10 @@ struct MessageComposerView: View {
                     if let fileTrigger, let sessionID = fileReferenceSessionID, let apiClient {
                         FilePathAutocompleteView(
                             query: fileTrigger.query,
-                            sessionID: sessionID,
-                            apiClient: apiClient,
                             search: filePathSearch,
+                            load: { query in
+                                await filePathSearch.search(query, sessionID: sessionID, apiClient: apiClient)
+                            },
                             onSelect: applyFileCompletion
                         )
                         .padding(.horizontal)
@@ -413,20 +560,30 @@ struct MessageComposerView: View {
                             agentCommands: agentCommands,
                             skillsOnly: showsSlashAutocompleteSkillsOnly,
                             selectedReasoningEffort: selectedReasoningEffort,
+                            scope: slashScope,
+                            reasoningLevels: slashScope.isHermes
+                                ? supportedReasoningEfforts ?? [] : SlashCommandCatalog.reasoningLevels,
+                            hostCompletion: hostSlashCompletion,
                             onSelectCommand: { command in
-                                applyCompletion("/\(command.name) ")
+                                pickCompletion("/\(command.name) ")
                             },
                             onSelectSkillCommand: { skill in
-                                applyCompletion("/\(skill.slashName) ")
+                                pickCompletion("/\(skill.slashName) ")
                             },
                             onSelectAgentCommand: { command in
-                                applyCompletion("/\(command.name) ")
+                                pickCompletion("/\(command.name) ")
                             },
                             onSelectSkillSubArg: { skill in
-                                applyCompletion("/skills \(skill.slashName) ")
+                                pickCompletion("/skills \(skill.slashName) ")
                             },
                             onSelectSubArg: { subArg in
-                                applyCompletion("/\(parsedSlashQuery.commandName) \(subArg)")
+                                pickCompletion("/\(parsedSlashQuery.commandName) \(subArg)")
+                            },
+                            onSelectHostArgument: { item in
+                                if let completion = hostSlashCompletion, let trigger = slashTrigger,
+                                   completion.applies(to: trigger.text) {
+                                    pickCompletion(completion.applying(item))
+                                }
                             },
                             onDismiss: {
                                 applyCompletion("")
@@ -477,24 +634,86 @@ struct MessageComposerView: View {
                     }
             }
         )
+        .background {
+            HermexKeyboardRetainingOverlay(isPresented: showMediaPicker) {
+                HermexAttachmentPickerView(
+                    imageCapacity: HermexAttachmentPickerPolicy.availableCapacity(
+                        existingCount: pendingAttachments.count,
+                        maximum: uploadsAttachmentsOnSend
+                            ? HermexAttachmentPickerPolicy.maximumBotAttachments
+                            : HermexAttachmentPickerPolicy.maximumSessionImages
+                    ),
+                    onChooseFiles: {
+                        presentFilesAfterMediaPickerDismisses = true
+                    },
+                    onAdd: { media in
+                        guard !media.isEmpty else { return }
+                        deferFocusRestoreUntilUploadCompletes()
+                        onPhotoMediaSelected(media)
+                    },
+                    onDismiss: {
+                        showMediaPicker = false
+                    }
+                )
+            }
+            .frame(width: 0, height: 0)
+        }
+        // The same keyboard-retaining overlay as the "+" picker and the Bot
+        // composer's send-choice card, so the keyboard stays up.
+        .background {
+            HermexKeyboardRetainingOverlay(isPresented: choosingSendBehavior) {
+                SendChoiceCard(
+                    choices: sendChoices,
+                    onPick: pickSendBehavior,
+                    onDismiss: closeSendChoices
+                )
+            }
+            .frame(width: 0, height: 0)
+        }
+        // The run ending, or Send turning into Stop, closes the card and drops
+        // a hold that has not opened it yet, as the Bot composer does.
+        .onChange(of: sendChoices) { _, choices in
+            guard choices.isEmpty else { return }
+            cancelScheduledSendChoices()
+            closeSendChoices()
+        }
+        .onChange(of: isPressingSend) { _, isPressing in
+            if isPressing {
+                scheduleSendChoices()
+            } else {
+                cancelScheduledSendChoices()
+            }
+        }
         .task(id: draftMayReferenceSkill) {
             await loadSkillSuggestionsForChipsIfNeeded()
+        }
+        .task(id: ComposerChipTokenizer.fileReferenceCandidates(in: draftMessage)) {
+            await onFileReferenceCandidatesChange(draftMessage)
         }
         .task(id: slashAutocompleteLoadKey) {
             await loadSlashAutocompleteSubArgsIfNeeded()
         }
-        .task {
+        .task(id: hostSlashArgumentText) {
+            await onCompleteHostSlashArgument(hostSlashArgumentText)
+        }
+        .task(id: AppLock.shared.isLocked) {
             // Cold path: the composer appears already active (the usual case for the
             // "New Chat with Voice" intent once its session is created) — start here.
+            // Runs again when the app lock changes, since dictation waits for it (#885);
+            // one modifier keeps this chain inside CI Xcode's type-checking budget.
+            if AppLock.shared.isLocked { voiceInput.suspend() }
+            else if scenePhase == .active { voiceInput.resume() }
             autoStartVoiceInputIfNeeded()
         }
+        .onChange(of: sessionID) { _, _ in voiceInput.stopBeforeSubmittingDraft() }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
-                voiceInput.stopBeforeSubmittingDraft()
+                voiceInput.suspend()
                 // Backgrounding stops the recorder's run-loop ticker, so cancel
                 // the in-flight recording rather than leave it silently stalled.
                 cancelVoiceNote()
             } else {
+                voiceInput.resume()
                 // An intent that opened this composer may have foregrounded the app
                 // a beat after it appeared; auto-start once we're active (#338).
                 autoStartVoiceInputIfNeeded()
@@ -507,28 +726,23 @@ struct MessageComposerView: View {
                 finishVoiceNote(translationHeight: 0)
             }
         }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItems, matching: .images)
-        .onChange(of: selectedPhotoItems) {
-            let items = selectedPhotoItems
-            guard !items.isEmpty else { return }
-            deferFocusRestoreUntilUploadCompletes()
-            selectedPhotoItems.removeAll()
-            for item in items {
-                onPhotoItemSelected(item)
+        .onChange(of: showMediaPicker) { _, isPresented in
+            guard !isPresented else { return }
+            guard presentFilesAfterMediaPickerDismisses else {
+                if !showFileImporter { restoreFocusAfterPresentationDismissalSettles() }
+                return
+            }
+            presentFilesAfterMediaPickerDismisses = false
+            prepareForComposerPresentation()
+            Task { @MainActor in
+                await Task.yield()
+                showFileImporter = true
             }
         }
-        .fullScreenCover(isPresented: $showCameraPicker) {
-            CameraPickerView { image in
-                deferFocusRestoreUntilUploadCompletes()
-                onPasteImages([image])
-            }
-            .ignoresSafeArea()
-        }
-        .onChange(of: showCameraPicker) { _, isPresented in
-            if !isPresented {
-                restoreFocusAfterPresentationDismissalSettles()
-            }
-        }
+    }
+
+    var body: some View {
+        composerWithLifecycle
         .sheet(isPresented: $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
             ModelPickerSheet(
                 configuration: .composer,
@@ -642,11 +856,6 @@ struct MessageComposerView: View {
                 optimisticWorkspacePath = nil
             }
         }
-        .onChange(of: showPhotoPicker) { _, isPresented in
-            if !isPresented, selectedPhotoItems.isEmpty {
-                restoreFocusAfterPresentationDismissalSettles()
-            }
-        }
         .onChange(of: showFileImporter) { _, isPresented in
             if !isPresented {
                 restoreFocusAfterPresentationDismissalSettles()
@@ -672,6 +881,7 @@ struct MessageComposerView: View {
         .onDisappear {
             voiceInput.stopBeforeSubmittingDraft()
             cancelVoiceNote()
+            cancelScheduledSendChoices()
         }
         .padding(.bottom, keyboardIsVisible ? 10 : 0)
     }
@@ -685,8 +895,7 @@ struct MessageComposerView: View {
             || shouldRestoreFocusAfterPresentation
             || showsAllModelsSheet
             || showsWorkspaceSheet
-            || showPhotoPicker
-            || showCameraPicker
+            || showMediaPicker
             || showFileImporter
     }
 
@@ -706,7 +915,7 @@ struct MessageComposerView: View {
 
             HStack(alignment: .center, spacing: 4) {
                 ComposerTextInputView(
-                    text: $draftMessage,
+                    text: Binding(get: { draftMessage }, set: editDraft),
                     selection: $composerSelection,
                     isFocused: $isFocused,
                     inputHeight: $textInputHeight,
@@ -729,7 +938,8 @@ struct MessageComposerView: View {
                         onOpenFileReference(path)
                     },
                     onTapQuote: presentQuote,
-                    onRemoveQuote: removeQuote
+                    onRemoveQuote: removeQuote,
+                    recallLastSentText: recallLastSentText
                 )
 
                 if !isExpanded {
@@ -758,13 +968,15 @@ struct MessageComposerView: View {
             ComposerToolbarScroller {
                 composerPlusMenu
 
-                modelEffortControl
+                if showsSessionControls || showsModelAndProfileControls {
+                    modelEffortControl
 
-                workspaceSelector
+                    if showsSessionControls { workspaceSelector }
 
-                profileSelector
+                    profileSelector
 
-                gitBranchPicker
+                    if showsSessionControls { gitBranchPicker }
+                }
 
                 voiceControlButton
 
@@ -794,9 +1006,11 @@ struct MessageComposerView: View {
     }
 
     /// One trailing circle in both states. Stop while a response streams and the
-    /// draft is empty; Send (which queues mid-run) as soon as there is text.
+    /// draft is empty; Send as soon as there is text. Mid-run a tap sends with
+    /// the Send While Responding default, and a hold opens the send-choice card
+    /// for this one message (`ChatComposerSendButton`).
     private var actionButton: some View {
-        Button(action: actionButtonTapped) {
+        Button(action: actionButtonPressed) {
             actionButtonLabel
                 .frame(width: circleSize, height: circleSize)
                 .background(actionButtonBackground)
@@ -804,8 +1018,15 @@ struct MessageComposerView: View {
                 .clipShape(Circle())
         }
         .buttonStyle(.chatTactile(.icon))
+        .simultaneousGesture(sendHoldGesture)
         .disabled(isActionButtonDisabled)
-        .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
+        .accessibilityLabel(sendButton.accessibilityLabel)
+        .accessibilityActions {
+            // VoiceOver can't hold, so each choice is a named action.
+            ForEach(sendChoices, id: \.self) { behavior in
+                Button(behavior.title) { pickSendBehavior(behavior) }
+            }
+        }
     }
 
     @ViewBuilder
@@ -814,13 +1035,64 @@ struct MessageComposerView: View {
             ProgressView()
                 .tint(actionButtonForeground)
                 .scaleEffect(0.9)
-        } else if showsStopButton {
-            Image(systemName: "stop.fill")
-                .font(.system(size: actionIconSize, weight: .semibold))
         } else {
-            Image(systemName: "arrow.up")
+            // Morphs between Stop and the default's Send glyph; instant
+            // with Reduce Motion.
+            Image(systemName: sendButton.systemName)
                 .font(.system(size: actionIconSize, weight: .semibold))
+                .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
         }
+    }
+
+    /// Times a hold the way the mic does (`ComposerVoiceControlButton`): one
+    /// `DragGesture(minimumDistance: 0)` beside the button's own tap, where
+    /// touch-down schedules the card and lifting before the delay cancels it.
+    /// The gesture state resets on a cancelled touch too, so a hold can never
+    /// stay armed.
+    private var sendHoldGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .updating($isPressingSend) { _, isPressing, _ in
+                isPressing = true
+            }
+    }
+
+    private func scheduleSendChoices() {
+        sendHold.pressBegan()
+        cancelScheduledSendChoices()
+        guard !sendChoices.isEmpty else { return }
+        let item = DispatchWorkItem {
+            sendHold.openedChoices()
+            choosingSendBehavior = true
+        }
+        sendHoldWorkItem = item
+        // The mic's hold delay, so the composer's two holds feel alike.
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + ComposerVoiceNoteGesture.holdActivationDelay,
+            execute: item
+        )
+    }
+
+    private func cancelScheduledSendChoices() {
+        sendHoldWorkItem?.cancel()
+        sendHoldWorkItem = nil
+    }
+
+    /// Closes the send-choice card. A hold still down keeps its release from
+    /// sending (or stopping); see `ChatComposerSendHold`.
+    private func closeSendChoices() {
+        choosingSendBehavior = false
+        sendHold.choicesClosed(isPressing: isPressingSend)
+    }
+
+    /// The card's rows and VoiceOver's named actions both land here.
+    private func pickSendBehavior(_ behavior: StreamingSendBehavior) {
+        closeSendChoices()
+        // A pick can outlive the run or the draft it was offered for.
+        guard sendChoices.contains(behavior) else { return }
+        if voiceInput.isListening {
+            voiceInput.stopBeforeSubmittingDraft()
+        }
+        onSendWithBehavior(behavior)
     }
 
     /// Whether the draft holds anything that could be drawn as a skill chip.
@@ -862,7 +1134,9 @@ struct MessageComposerView: View {
     }
 
     private var composerPlusMenu: some View {
-        ChatUIKitMenuButton {
+        Button {
+            showMediaPicker = true
+        } label: {
             Image(systemName: "plus")
                 .font(.system(size: plusIconSize, weight: .medium))
                 .foregroundStyle(metaControlColor)
@@ -876,51 +1150,12 @@ struct MessageComposerView: View {
                     in: Circle()
                 )
                 .clipShape(Circle())
-        } menu: {
-            composerOptionsMenu()
         }
+        .buttonStyle(.plain)
         .tint(metaControlColor)
         .disabled(isConfigurationControlDisabled)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Composer options")
-    }
-
-    private func composerOptionsMenu() -> UIMenu {
-        UIMenu(title: "", children: [
-            UIMenu(
-                title: String(localized: "Attach"),
-                options: [.displayInline],
-                children: [
-                    UIAction(
-                        title: String(localized: "Attach File"),
-                        image: UIImage(systemName: "paperclip")
-                    ) { _ in
-                        Task { @MainActor in
-                            prepareForComposerPresentation()
-                            showFileImporter = true
-                        }
-                    },
-                    UIAction(
-                        title: String(localized: "Photos"),
-                        image: UIImage(systemName: "photo.on.rectangle")
-                    ) { _ in
-                        Task { @MainActor in
-                            prepareForComposerPresentation()
-                            showPhotoPicker = true
-                        }
-                    },
-                    UIAction(
-                        title: String(localized: "Camera"),
-                        image: UIImage(systemName: "camera"),
-                        attributes: UIImagePickerController.isSourceTypeAvailable(.camera) ? [] : .disabled
-                    ) { _ in
-                        Task { @MainActor in
-                            prepareForComposerPresentation()
-                            showCameraPicker = true
-                        }
-                    }
-                ]
-            )
-        ])
     }
 
     @ViewBuilder
@@ -1001,7 +1236,8 @@ struct MessageComposerView: View {
             model: selectedModelOption,
             effort: selectedReasoningEffort,
             supportedEfforts: supportedReasoningEfforts,
-            supportsEffort: showsReasoningControl ? supportsReasoningEffort : false
+            supportsEffort: showsReasoningControl ? supportsReasoningEffort : false,
+            sentEffort: sentReasoningEffort
         )
     }
 
@@ -1032,25 +1268,30 @@ struct MessageComposerView: View {
         showsAllModelsSheet = true
     }
 
-    private var composerStatus: (text: String, isError: Bool, isDismissible: Bool)? {
+    private var composerStatus: (text: String, isError: Bool, isDismissible: Bool, onRetry: (() -> Void)?, fixPrompt: String?,
+                                 onCancel: (() -> Void)?)? {
         if let readOnlyMessage {
-            return (readOnlyMessage, false, false)
+            return (readOnlyMessage, false, false, nil, nil, nil)
         } else if isWaitingForStream && isCancellingStream {
-            return (String(localized: "Stopping response..."), false, false)
+            return (String(localized: "Stopping response..."), false, false, nil, nil, nil)
         } else if isCompressingSession {
-            return (String(localized: "Compressing context..."), false, false)
+            return (String(localized: "Compressing context..."), false, false, nil, nil, nil)
         } else if let uploadAttachmentErrorMessage {
-            return (uploadAttachmentErrorMessage, true, true)
+            return (uploadAttachmentErrorMessage, true, true, nil, nil, nil)
         } else if isSendingVoiceNote {
-            return (String(localized: "Sending voice note..."), false, false)
+            return (String(localized: "Sending voice note..."), false, false, nil, nil, nil)
         } else if isUploadingAttachment {
-            return (String(localized: "Uploading attachment..."), false, false)
+            return (String(localized: "Uploading attachment..."), false, false, nil, nil, onCancelAttachmentUpload)
+        } else if let steerFailure {
+            return (steerFailure.message, true, false, steerFailure.onRetry, nil, nil)
         } else if let errorMessage {
-            return (errorMessage, true, false)
+            return (errorMessage, true, false, nil, errorFixPrompt, nil)
         } else if let configurationErrorMessage {
-            return (configurationErrorMessage, true, false)
+            return (configurationErrorMessage, true, false, nil, nil, nil)
+        } else if let configurationNotice {
+            return (configurationNotice, false, false, nil, nil, nil)
         } else if isUpdatingConfiguration {
-            return (String(localized: "Updating composer settings..."), false, false)
+            return (String(localized: "Updating composer settings..."), false, false, nil, nil, nil)
         }
 
         return nil
@@ -1154,7 +1395,8 @@ struct MessageComposerView: View {
     /// Recording mid-stream is fine (it queues like any send), so unlike dictation
     /// this does not block on `isWaitingForStream`.
     private var isVoiceNoteRecordingDisabled: Bool {
-        isReadOnly
+        !showsSessionControls
+            || isReadOnly
             || isSending
             || isSendingVoiceNote
             || isCompressingSession
@@ -1177,12 +1419,23 @@ struct MessageComposerView: View {
         draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var showsStopButton: Bool {
-        ChatComposerSendGate.showsStopButton(
+    private var sendButton: ChatComposerSendButton {
+        ChatComposerSendButton(
             isWaitingForStream: isWaitingForStream,
             hasText: !trimmedDraftMessage.isEmpty,
-            hasQuotes: !quotes.isEmpty
+            hasQuotes: !quotes.isEmpty,
+            defaultBehavior: streamingSendBehavior,
+            stagedFilesDropSteer: uploadsAttachmentsOnSend && !pendingAttachments.isEmpty
         )
+    }
+
+    private var showsStopButton: Bool {
+        sendButton.showsStop
+    }
+
+    /// What a hold on Send offers right now: nothing while Send is disabled.
+    private var sendChoices: [StreamingSendBehavior] {
+        isActionButtonDisabled ? [] : sendButton.choices
     }
 
     private var isActionButtonDisabled: Bool {
@@ -1205,6 +1458,14 @@ struct MessageComposerView: View {
         )
     }
 
+    /// A tap on the circle. The release of a hold that opened the send-choice
+    /// card lands here too, and is dropped so the hold never also sends.
+    private func actionButtonPressed() {
+        guard sendHold.activate() else { return }
+        actionButtonTapped()
+    }
+
+    /// Stop, or Send with the default. Command-Return comes straight here.
     private func actionButtonTapped() {
         if showsStopButton {
             onCancel()
@@ -1218,12 +1479,14 @@ struct MessageComposerView: View {
 
     /// Starts dictation once for a composer opened by the "New Chat with Voice" intent (#338),
     /// mirroring a mic tap. Gated so it fires a single time, only while the app is active and
-    /// the mic is free; the reused tap path handles the mic/speech permission prompt and surfaces
-    /// a clear error if access is denied, so a denied/undetermined mic degrades gracefully.
+    /// unlocked (the scene stays active under the app lock, so the microphone never starts
+    /// behind it) and the mic is free; the reused tap path handles the mic/speech permission
+    /// prompt and surfaces a clear error if access is denied, so a denied/undetermined mic
+    /// degrades gracefully.
     @MainActor
     private func autoStartVoiceInputIfNeeded() {
         guard autoStartsVoiceInput, !didAutoStartVoiceInput else { return }
-        guard scenePhase == .active else { return }
+        guard scenePhase == .active, !AppLock.shared.isLocked else { return }
         didAutoStartVoiceInput = true
         guard !voiceInput.isListening, !isVoiceInputDisabled else { return }
         toggleVoiceInput()
@@ -1233,11 +1496,8 @@ struct MessageComposerView: View {
     private func toggleVoiceInput() {
         voiceInput.apiClient = apiClient
         voiceInput.providerPreference = ComposerSTTProviderPreference.storedValue(sttProviderPreferenceRawValue)
-        voiceInput.locale = .current
-        Task {
-            await voiceInput.toggle(currentDraft: draftMessage) { newDraft in
-                draftMessage = newDraft
-            }
+        voiceInput.scheduleToggle(currentDraft: draftMessage) { newDraft in
+            editDraft(newDraft)
         }
     }
 

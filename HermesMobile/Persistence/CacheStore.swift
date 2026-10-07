@@ -8,6 +8,10 @@ enum CacheStore {
         in context: ModelContext,
         now: Date = Date()
     ) throws -> [SessionSummary] {
+        var rows = 0
+        let signpost = performanceSignposter.beginInterval("Cache Read")
+        defer { performanceSignposter.endInterval("Cache Read", signpost, "rows=\(rows, privacy: .public)") }
+
         let serverURLString = serverURL.absoluteString
         let descriptor = FetchDescriptor<CachedSession>(
             predicate: #Predicate { cachedSession in
@@ -15,9 +19,22 @@ enum CacheStore {
             }
         )
 
-        return try context.fetch(descriptor)
+        let sessions = try context.fetch(descriptor)
             .filter { $0.archived != true && $0.expiresAt > now }
             .map(SessionSummary.init(cachedSession:))
+        rows = sessions.count
+        return sessions
+    }
+
+    /// One cached session on `serverURL` by id, for a label such as a fork's
+    /// "Forked from" row. Unlike `cachedSessions`, an expired row still counts
+    /// until the next save purges it: a stale title beats none. Archived
+    /// sessions are never cached, so an archived parent returns nil and the
+    /// caller falls back. Never crosses servers.
+    @MainActor
+    static func cachedSession(id sessionID: String, serverURL: URL, in context: ModelContext) throws -> SessionSummary? {
+        let cacheKey = CachedSession.cacheKey(serverURLString: serverURL.absoluteString, sessionID: sessionID)
+        return try cachedSession(cacheKey: cacheKey, in: context).map(SessionSummary.init(cachedSession:))
     }
 
     @MainActor
@@ -28,6 +45,10 @@ enum CacheStore {
         limit: Int? = nil,
         now: Date = Date()
     ) throws -> [ChatMessage] {
+        var rows = 0
+        let signpost = performanceSignposter.beginInterval("Cache Read")
+        defer { performanceSignposter.endInterval("Cache Read", signpost, "rows=\(rows, privacy: .public)") }
+
         if let limit, limit <= 0 {
             return []
         }
@@ -51,6 +72,7 @@ enum CacheStore {
         }
 
         let cachedMessages = try context.fetch(descriptor)
+        rows = cachedMessages.count
         if limit != nil {
             return cachedMessages.reversed().map(ChatMessage.init(cachedMessage:))
         }
@@ -64,6 +86,9 @@ enum CacheStore {
         in context: ModelContext,
         cachedAt: Date = Date()
     ) throws {
+        let signpost = performanceSignposter.beginInterval("Cache Write")
+        defer { performanceSignposter.endInterval("Cache Write", signpost, "rows=\(sessions.count, privacy: .public)") }
+
         let serverURLString = serverURL.absoluteString
         let cacheableSessions = sessions.filter { $0.archived != true && $0.sessionId != nil }
         let freshKeys = Set(cacheableSessions.compactMap { session -> String? in
@@ -71,28 +96,38 @@ enum CacheStore {
             return CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
         })
 
-        for session in cacheableSessions {
-            guard let sessionID = session.sessionId else { continue }
-            let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
-            if let cachedSession = try cachedSession(cacheKey: cacheKey, in: context) {
-                cachedSession.apply(session, cachedAt: cachedAt)
-            } else {
-                context.insert(CachedSession(serverURLString: serverURLString, session: session, cachedAt: cachedAt))
-            }
-        }
-
+        // One server-scoped fetch serves both the upsert lookups and the stale
+        // sweep, mirroring `cacheMessages`. Inserted rows join the dictionary so a
+        // duplicate session in the response updates that row instead of inserting
+        // a second one with the same unique key.
         let descriptor = FetchDescriptor<CachedSession>(
             predicate: #Predicate { cachedSession in
                 cachedSession.serverURLString == serverURLString
             }
         )
-        let staleSessions = try context.fetch(descriptor).filter { !freshKeys.contains($0.cacheKey) }
+        let cachedSessions = try context.fetch(descriptor)
+        var cachedSessionsByKey = cachedSessions.reduce(into: [String: CachedSession]()) {
+            $0[$1.cacheKey] = $1
+        }
+
+        for session in cacheableSessions {
+            guard let sessionID = session.sessionId else { continue }
+            let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
+            if let cachedSession = cachedSessionsByKey[cacheKey] {
+                cachedSession.apply(session, cachedAt: cachedAt)
+            } else {
+                let cachedSession = CachedSession(serverURLString: serverURLString, session: session, cachedAt: cachedAt)
+                context.insert(cachedSession)
+                cachedSessionsByKey[cacheKey] = cachedSession
+            }
+        }
+
+        let staleSessions = cachedSessions.filter { !freshKeys.contains($0.cacheKey) }
         for staleSession in staleSessions {
             context.delete(staleSession)
         }
 
-        try performMaintenance(in: context, now: cachedAt)
-        try context.save()
+        try saveAndTrim(context, now: cachedAt)
     }
 
     @MainActor
@@ -103,6 +138,9 @@ enum CacheStore {
         cachedAt: Date = Date()
     ) throws {
         guard let sessionID = session.sessionId else { return }
+
+        let signpost = performanceSignposter.beginInterval("Cache Write")
+        defer { performanceSignposter.endInterval("Cache Write", signpost, "rows=1") }
 
         let serverURLString = serverURL.absoluteString
         let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
@@ -117,8 +155,7 @@ enum CacheStore {
             context.insert(CachedSession(serverURLString: serverURLString, session: session, cachedAt: cachedAt))
         }
 
-        try performMaintenance(in: context, now: cachedAt)
-        try context.save()
+        try saveAndTrim(context, now: cachedAt)
     }
 
     @MainActor
@@ -129,6 +166,9 @@ enum CacheStore {
         in context: ModelContext,
         cachedAt: Date = Date()
     ) throws {
+        let signpost = performanceSignposter.beginInterval("Cache Write")
+        defer { performanceSignposter.endInterval("Cache Write", signpost, "rows=\(messages.count, privacy: .public)") }
+
         let serverURLString = serverURL.absoluteString
         let freshKeys = Set(messages.enumerated().map { offset, message in
             CachedMessage.cacheKey(
@@ -162,7 +202,7 @@ enum CacheStore {
                 sortIndex: offset
             )
             if let cachedMessage = cachedMessagesByKey[cacheKey] {
-                cachedMessage.apply(message, sortIndex: offset, cachedAt: cachedAt)
+                cachedMessage.refresh(from: message, sortIndex: offset, cachedAt: cachedAt)
             } else {
                 context.insert(CachedMessage(
                     serverURLString: serverURLString,
@@ -179,8 +219,7 @@ enum CacheStore {
             context.delete(staleMessage)
         }
 
-        try performMaintenance(in: context, now: cachedAt)
-        try context.save()
+        try saveAndTrim(context, now: cachedAt)
     }
 
     /// Deletes only the cached sessions and messages belonging to `serverURL`,
@@ -213,53 +252,38 @@ enum CacheStore {
         try context.save()
     }
 
+    /// Saves a cache write, then enforces the TTL and the message cap. The write
+    /// is saved first so the store-side delete and count below see exactly what
+    /// the context holds: a row this write just refreshed is no longer expired in
+    /// the store either. Maintenance never loads rows unless some must go: the
+    /// expiry delete runs in the store and eviction starts from a COUNT.
     @MainActor
-    private static func performMaintenance(in context: ModelContext, now: Date) throws {
-        try deleteExpiredSessions(in: context, now: now)
-        try deleteExpiredMessages(in: context, now: now)
+    private static func saveAndTrim(_ context: ModelContext, now: Date) throws {
+        try context.save()
+        try context.delete(model: CachedSession.self, where: #Predicate { $0.expiresAt <= now })
+        try context.delete(model: CachedMessage.self, where: #Predicate { $0.expiresAt <= now })
         try evictOldestMessagesIfNeeded(in: context)
-    }
-
-    @MainActor
-    private static func deleteExpiredSessions(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedSession>()
-        let expiredSessions = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for session in expiredSessions {
-            context.delete(session)
+        if context.hasChanges {
+            try context.save()
         }
     }
 
-    @MainActor
-    private static func deleteExpiredMessages(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let expiredMessages = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for message in expiredMessages {
-            context.delete(message)
-        }
-    }
-
+    /// Deletes the least recently cached messages above `CachePolicy.maxMessages`,
+    /// fetching only the overflow rows.
     @MainActor
     private static func evictOldestMessagesIfNeeded(in context: ModelContext) throws {
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let messages = try context.fetch(descriptor)
-        let overflowCount = messages.count - CachePolicy.maxMessages
+        let overflowCount = try context.fetchCount(FetchDescriptor<CachedMessage>()) - CachePolicy.maxMessages
         guard overflowCount > 0 else { return }
 
-        let messagesToEvict = messages
-            .sorted { left, right in
-                if left.cachedAt != right.cachedAt {
-                    return left.cachedAt < right.cachedAt
-                }
-
-                if left.timestamp != right.timestamp {
-                    return (left.timestamp ?? 0) < (right.timestamp ?? 0)
-                }
-
-                return left.sortIndex < right.sortIndex
-            }
-            .prefix(overflowCount)
-
-        for message in messagesToEvict {
+        var descriptor = FetchDescriptor<CachedMessage>(
+            sortBy: [
+                SortDescriptor(\.cachedAt),
+                SortDescriptor(\.timestamp),
+                SortDescriptor(\.sortIndex)
+            ]
+        )
+        descriptor.fetchLimit = overflowCount
+        for message in try context.fetch(descriptor) {
             context.delete(message)
         }
     }
@@ -347,6 +371,7 @@ private extension ChatMessage {
             contentParts: contentParts,
             reasoning: cachedMessage.reasoning,
             attachments: attachments,
+            displayKind: cachedMessage.displayKind,
             turnTps: cachedMessage.turnTps,
             turnDuration: cachedMessage.turnDuration
         )

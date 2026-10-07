@@ -9,6 +9,31 @@ enum ChatHapticFeedback: Equatable {
     case warning
 }
 
+/// A Bot Chat or room action the host confirmed, published by the model for its
+/// view to play through `ChatHaptics.botFeedback`. Models set it only on a success
+/// path that already passed their stale-reply checks. `id` grows with every event,
+/// so two identical events in a row both reach the view's `onChange`.
+struct BotFeedback: Equatable {
+    enum Event: Equatable {
+        case sent
+        case approved(BotApprovalRequest.Choice)
+        /// A clarify answer or skip, or a credential value or skip.
+        case answered
+        case stopped
+        /// A turn this screen watched go from busy to idle.
+        case turnCompleted
+    }
+
+    let event: Event
+    let id: Int
+
+    /// The event that follows `previous`, with a fresh id.
+    init(_ event: Event, after previous: BotFeedback?) {
+        self.event = event
+        id = (previous?.id ?? 0) + 1
+    }
+}
+
 @MainActor
 enum ChatHaptics {
     typealias Performer = @MainActor (ChatHapticFeedback) -> Void
@@ -34,6 +59,21 @@ enum ChatHaptics {
         }
     }
 
+    /// The Sessions haptic for a confirmed Bot Chat or room event, so a bot feels
+    /// the same as a session.
+    static func botFeedback(_ event: BotFeedback.Event, isEnabled: Bool, performer: Performer? = nil) {
+        switch event {
+        case .sent: messageSent(isEnabled: isEnabled, performer: performer)
+        case .approved(let choice):
+            // Both enums spell the host's once/session/always/deny.
+            guard let choice = ApprovalChoice(rawValue: choice.rawValue) else { return }
+            approvalSubmitted(choice, isEnabled: isEnabled, performer: performer)
+        case .answered: clarificationSubmitted(isEnabled: isEnabled, performer: performer)
+        case .stopped: streamCancelled(isEnabled: isEnabled, performer: performer)
+        case .turnCompleted: assistantResponseCompleted(isEnabled: isEnabled, performer: performer)
+        }
+    }
+
     static func approvalBypassEnabled(isEnabled: Bool, performer: Performer? = nil) {
         emit(.warning, isEnabled: isEnabled, performer: performer)
     }
@@ -43,6 +83,13 @@ enum ChatHaptics {
     }
 
     static func configurationSelected(isEnabled: Bool, performer: Performer? = nil) {
+        emit(.selection, isEnabled: isEnabled, performer: performer)
+    }
+
+    /// A row the user tapped in a composer's autocomplete panel: a command,
+    /// skill, sub-argument, file, folder, bot or mention. Dismissing the panel
+    /// is not a pick and plays nothing.
+    static func autocompleteAccepted(isEnabled: Bool, performer: Performer? = nil) {
         emit(.selection, isEnabled: isEnabled, performer: performer)
     }
 

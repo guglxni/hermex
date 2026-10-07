@@ -61,8 +61,8 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         AttachmentAudioDetection.isAudio(isImage: isImage, mime: mime, name: name, path: path)
     }
 
-    var isKnownUnsupportedBinary: Bool {
-        Self.unsupportedBinaryExtensions.contains(pathExtension)
+    var binaryPreview: BinaryFilePreview? {
+        BinaryFilePreview(path: name ?? path ?? "")
     }
 
     private var pathExtension: String {
@@ -71,13 +71,6 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
 
     private static let imageExtensions: Set<String> = [
         "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif", "ico"
-    ]
-
-    private static let unsupportedBinaryExtensions: Set<String> = [
-        "7z", "a", "aiff", "avi", "bin", "bz2", "class", "db", "dmg", "doc",
-        "docx", "dylib", "exe", "flac", "gz", "jar", "m4a", "mov", "mp3",
-        "mp4", "o", "pdf", "pkg", "ppt", "pptx", "pyc", "rar", "sqlite",
-        "svg", "tar", "tgz", "wav", "xls", "xlsx", "xz", "zip"
     ]
 }
 
@@ -149,6 +142,8 @@ struct ChatAttachmentPreviewView: View {
             imageContent(file)
         case let .audio(data):
             audioContent(data)
+        case let .quickLook(file):
+            QuickLookFileView(url: file.url)
         case let .unavailable(message):
             unavailableContent(message)
         }
@@ -252,7 +247,7 @@ struct ChatAttachmentPreviewView: View {
                 parts.append(ByteCountFormatter.string(fromByteCount: Int64(file.originalByteCount), countStyle: .file))
             case let .audio(data):
                 parts.append(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))
-            case .unavailable:
+            case .quickLook, .unavailable:
                 break
             }
         } else if let size = item.size {
@@ -276,8 +271,8 @@ struct ChatAttachmentPreviewView: View {
 }
 
 /// An attachment that is already known to be an image opens in the full-bleed lightbox.
-/// Text, audio, and anything without a preview keeps `ChatAttachmentPreviewView`, which
-/// only learns what it has once the server answers.
+/// Text, audio, Quick Look documents, and anything without a preview keep
+/// `ChatAttachmentPreviewView`, which only learns what it has once the server answers.
 struct ChatAttachmentImageLightbox: View {
     let onAPIError: (Error) -> Void
 
@@ -327,7 +322,7 @@ struct ChatAttachmentImageLightbox: View {
         case let .unavailable(message):
             return .failure(message)
 
-        case .text, .audio:
+        case .text, .audio, .quickLook:
             return .failure(String(localized: "Preview is not available for this attachment."))
 
         case .none:
@@ -359,10 +354,10 @@ final class ChatAttachmentPreviewViewModel {
     private(set) var errorMessage: String?
     private(set) var lastError: Error?
 
-    init(session: SessionSummary, server: URL, item: ChatAttachmentPreviewItem) {
+    init(session: SessionSummary, server: URL, item: ChatAttachmentPreviewItem, apiClient: APIClient? = nil) {
         self.session = session
         self.item = item
-        apiClient = APIClient(baseURL: server)
+        self.apiClient = apiClient ?? APIClient(baseURL: server)
     }
 
     func load(force: Bool = false) async {
@@ -370,14 +365,16 @@ final class ChatAttachmentPreviewViewModel {
         didLoad = true
         preview = nil
 
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
-            return
-        }
-
+        // A pathless item, such as a Hermes session's chip (#1012), shows its local copy
+        // and never needs the session.
         let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let path = trimmedPath, !path.isEmpty else {
             preview = localFallbackPreview
+            return
+        }
+
+        guard let sessionID = session.sessionId else {
+            errorMessage = String(localized: "Session ID is missing.")
             return
         }
 
@@ -399,10 +396,15 @@ final class ChatAttachmentPreviewViewModel {
                 }
             } else if item.inferredIsAudio {
                 // Raw bytes (no downsampling) so AVAudioPlayer gets the original
-                // encoded audio; checked before the unsupported-binary list,
-                // which would otherwise reject m4a/mp3/wav/flac.
+                // encoded audio; checked before the Quick Look list, which would
+                // otherwise take m4a/mp3/wav/flac away from the inline player.
                 preview = .audio(try await apiClient.rawFileData(sessionID: sessionID, path: path))
-            } else if item.isKnownUnsupportedBinary {
+            } else if item.binaryPreview == .quickLook {
+                let apiClient = apiClient
+                preview = try await FilePreviewContent.loadQuickLook(name: item.displayName, knownSize: item.size) {
+                    try await apiClient.rawFilePreviewData(sessionID: sessionID, path: path)
+                }.content
+            } else if item.binaryPreview == .unavailable {
                 preview = .unavailable(String(localized: "Preview is not available for this file type."))
             } else {
                 preview = .text(try await apiClient.file(sessionID: sessionID, path: path))

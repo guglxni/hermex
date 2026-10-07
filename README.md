@@ -27,7 +27,7 @@ Your server. Your iPhone. No middleman.
 Hermex is a native SwiftUI iPhone app for driving a self-hosted [hermes-webui](https://github.com/nesquena/hermes-webui) server — a mobile cockpit for an AI agent that lives on a machine **you** control. The phone is the control plane, not the compute plane: the agent, its tools, and your data stay on your own hardware.
 
 - **Free.** No subscriptions, no in-app purchases.
-- **Private.** No analytics, no tracking, no third-party relay — the app talks only to your server.
+- **Private.** No analytics, no tracking. The app talks only to your server. Push notifications are optional and off until you enable them: an open-source relay you can self-host forwards them, seeing device tokens, notification metadata (kind, source, thread and session ids, timestamps), and ciphertext. It never sees message text, server URLs, or credentials.
 - **Native.** Real SwiftUI, built for iOS 18+, not a web wrapper.
 
 ## Features
@@ -68,6 +68,8 @@ Self-hosting the server, securing it, and keeping it reachable are your responsi
 
 - **HTTPS via a tunnel or reverse proxy (recommended).** Expose the server through Cloudflare Tunnel or any reverse proxy that terminates real TLS at a hostname you own. Real HTTPS keeps iOS App Transport Security happy with no exceptions. On a publicly reachable hostname the password is your only app-level defense — set a strong one.
 - **Private HTTPS with Tailscale Serve.** Keep the server password-protected and bound to `127.0.0.1:8787`, inspect existing Serve/Funnel routes, then add `tailscale serve --bg 8787` only when HTTPS port 443 at the root path is free. Install Tailscale on the iPhone and connect with the exact `https://…ts.net` URL reported by `tailscale serve status`. Direct binding to `0.0.0.0` over plain HTTP remains a manual fallback, not the default.
+- **Another private network, such as NetBird.** Install its app on the iPhone, keep it connected, and use the server's name or IP on that network.
+- **Same Wi-Fi.** On a home network you trust, use the machine's local address and port, such as `http://192.168.1.5:8787`. The server must listen on that address rather than only `127.0.0.1`, which exposes it to every device on the network, so keep the password strong.
 - **Simulator-only local testing** can use `http://localhost:8787` when the server runs on the same Mac.
 
 ### Troubleshooting the connection
@@ -107,7 +109,7 @@ Local validation defaults for XcodeBuildMCP users live in `.xcodebuildmcp/config
 
 The app is developed and tested against the `hermes-webui` commit pinned in [`UPSTREAM_TESTED_SHA`](UPSTREAM_TESTED_SHA). Upstream does not yet guarantee API stability (its README declares version skew unsupported pending their stable-API work), so newer or older server versions may break individual features — please include your server version in bug reports. The app decodes tolerantly (unknown fields never crash it) and endpoint shapes are verified against upstream source, never invented.
 
-Bot Mode's direct-Hermes connection has its own pin, [`HERMES_AGENT_TESTED_SHA`](HERMES_AGENT_TESTED_SHA): line 1 is the tested `hermes-agent` commit and line 2 the release string its `/api/status` reports. When a host reports a different release, the Bot connection screen shows a one-line "Untested Hermes version" note. It never blocks signing in.
+Bot Mode's direct-Hermes connection has its own pin, [`HERMES_AGENT_TESTED_SHA`](HERMES_AGENT_TESTED_SHA): line 1 is the tested `hermes-agent` commit and line 2 the release string its `/api/status` reports. Hermex refuses a host older than Hermes 0.21.3, the first release with the gateway contract it is built on, and asks you to update Hermes; 0.21.3 and later connect without a warning.
 
 ## Documentation map
 
@@ -134,8 +136,22 @@ Hermex is free and built in the open. If it's useful to you:
 - ⭐ **Star this repo** — it helps others find the project.
 - 🐦 **Follow [@uzairansar on X](https://x.com/uzairansar)** for updates and dev logs.
 - ☕ **[Buy me a coffee](https://buymeacoffee.com/callmeuzi)** to support development.
+- 💬 **[Join the Hermex Discord](https://discord.gg/xDQWBCG4DQ)** for help, updates, and to talk with other users.
+- 💛 **[Become a member](https://buymeacoffee.com/callmeuzi/membership)** for early TestFlight builds, the members-only Discord channels, and a vote on what gets built next.
 
 <a href="https://buymeacoffee.com/callmeuzi"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-callmeuzi-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee" height="40" /></a>
+
+### Supporters
+
+Hermex is funded by its members. Thank you.
+
+**Patrons:** Robin Edwards
+
+**Members:** Aaron Kaufer
+
+**Founding members:** James Cross · Alexey
+
+<sub>Updated monthly from [Buy Me a Coffee](https://buymeacoffee.com/callmeuzi/membership). Members who join anonymously aren't listed. Email [uzairansar@gmail.com](mailto:uzairansar@gmail.com) to be added or removed.</sub>
 
 ## License
 

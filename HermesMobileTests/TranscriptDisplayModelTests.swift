@@ -496,7 +496,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: true
+            isScrolledNearBottom: true,
+            activeRunStartedAt: nil
         ))
     }
 
@@ -506,11 +507,12 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.label, "Hermes is working")
+        XCTAssertEqual(presentation?.label(now: Date()), "Hermes is working")
     }
 
     func testStatusShowsStartingBeforeStreamIDExists() {
@@ -519,7 +521,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: false,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .starting)
@@ -531,11 +534,12 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .reconnecting,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .reconnecting)
-        XCTAssertEqual(presentation?.accessibilityLabel, "Hermes is reconnecting the response stream")
+        XCTAssertEqual(presentation?.accessibilityLabel(now: Date()), "Hermes is reconnecting the response stream")
     }
 
     func testStatusPrioritizesCancellationOverOtherStates() {
@@ -544,7 +548,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .checking,
             isCancellingStream: true,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .stopping)
@@ -556,8 +561,103 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: false,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         ))
+    }
+
+    func testActivePresentationShowsElapsedSinceRunStart() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: now.addingTimeInterval(-133)
+        )
+
+        XCTAssertEqual(presentation?.label(now: now), "Hermes is working · 2m 13s")
+        XCTAssertEqual(
+            presentation?.accessibilityLabel(now: now),
+            "Hermes has been working for 2 minutes, 13 seconds"
+        )
+    }
+
+    func testActivePresentationWithoutStartKeepsPlainLabel() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPresentation(kind: .active)
+
+        XCTAssertEqual(presentation.label(now: now), "Hermes is working")
+        XCTAssertEqual(presentation.accessibilityLabel(now: now), "Hermes is working on the response")
+    }
+
+    func testRecoveryKindsIgnoreRunStart() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let expectations: [(ActiveStreamRecoveryState, String)] = [
+            (.checking, "Checking stream"),
+            (.reconnecting, "Reconnecting stream")
+        ]
+
+        for (recoveryState, expectedLabel) in expectations {
+            let presentation = ChatActiveRunStatusPolicy.presentation(
+                isStartingChat: false,
+                hasActiveStream: true,
+                activeStreamRecoveryState: recoveryState,
+                isCancellingStream: false,
+                isScrolledNearBottom: false,
+                activeRunStartedAt: now.addingTimeInterval(-133)
+            )
+
+            XCTAssertEqual(presentation?.label(now: now), expectedLabel)
+            XCTAssertNil(presentation?.startedAt, "\(recoveryState) must not tick an elapsed counter")
+        }
+    }
+
+    func testWaitingForNetworkMapsToItsOwnKind() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .waitingForNetwork,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: now.addingTimeInterval(-133)
+        )
+
+        XCTAssertEqual(presentation?.kind, .waitingForNetwork)
+        XCTAssertEqual(presentation?.label(now: now), "Waiting for network")
+        XCTAssertNil(presentation?.startedAt)
+    }
+}
+
+/// The goal confirmation pinned above the composer carries the whole goal, so
+/// the stack caps each notice at two lines to keep the live transcript visible
+/// for the run (#772).
+@MainActor
+final class PinnedLocalNoticeStackTests: XCTestCase {
+    // The upstream goal-set notice: the whole goal, then the controls line.
+    private let longGoalNotice = """
+    ⊙ Goal set (20-turn budget): Refactor the billing module so invoices are generated by the new pricing \
+    engine, migrate the three legacy endpoints, keep the public API stable, add tests for proration and tax \
+    edge cases, and open a PR when CI is green.
+    I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.
+    Controls: /goal status · /goal pause · /goal resume · /goal clear
+    """
+
+    func testALongGoalNoticeStopsAtTwoLinesOnAPhone() {
+        let footnoteLine = UIFont.preferredFont(forTextStyle: .footnote).lineHeight
+        let oneLineHeight = fittedHeight(["Goal paused."])
+        let longGoalHeight = fittedHeight([longGoalNotice])
+
+        // 12 pt card padding above and below fewer than three footnote lines.
+        XCTAssertLessThan(longGoalHeight, 24 + 3 * footnoteLine)
+        XCTAssertGreaterThan(longGoalHeight, oneLineHeight, "the cap is two lines, not one")
+    }
+
+    private func fittedHeight(_ notices: [String]) -> CGFloat {
+        let host = UIHostingController(rootView: PinnedLocalNoticeStack(notices: notices))
+        return host.sizeThatFits(in: CGSize(width: 361, height: CGFloat.greatestFiniteMagnitude)).height
     }
 }
 
@@ -642,5 +742,80 @@ final class ClarificationRequestPresentationTests: XCTestCase {
     func testToggleCurveIsOneEaseOutClockAndSnapsUnderReduceMotion() {
         XCTAssertEqual(ChatMotion.clarificationToggle(reduceMotion: false), .easeOut(duration: 0.22))
         XCTAssertNil(ChatMotion.clarificationToggle(reduceMotion: true))
+    }
+
+    func testHeightPolicyFitsContentWithoutGrowingTheCard() {
+        XCTAssertEqual(
+            ClarificationRequestHeightPolicy.bodyHeight(
+                maximumExpandedHeight: 500,
+                fixedContentHeight: 160,
+                bodyContentHeight: 180,
+                minimumBodyHeight: 44
+            ),
+            180
+        )
+    }
+
+    func testHeightPolicyClampsBodyToSafeGapAndCap() {
+        XCTAssertEqual(
+            ClarificationRequestHeightPolicy.bodyHeight(
+                maximumExpandedHeight: 360,
+                fixedContentHeight: 160,
+                bodyContentHeight: 500,
+                minimumBodyHeight: 44
+            ),
+            200
+        )
+        XCTAssertEqual(
+            ClarificationRequestHeightPolicy.bodyHeight(
+                maximumExpandedHeight: 600,
+                fixedContentHeight: 160,
+                bodyContentHeight: 500,
+                minimumBodyHeight: 44
+            ),
+            300
+        )
+    }
+
+    func testHeightPolicyCollapsesWhenOneScaledChoiceCannotFit() {
+        XCTAssertNil(
+            ClarificationRequestHeightPolicy.bodyHeight(
+                maximumExpandedHeight: 247,
+                fixedContentHeight: 160,
+                bodyContentHeight: 500,
+                minimumBodyHeight: 88
+            )
+        )
+        XCTAssertEqual(
+            ClarificationRequestHeightPolicy.bodyHeight(
+                maximumExpandedHeight: 248,
+                fixedContentHeight: 160,
+                bodyContentHeight: 500,
+                minimumBodyHeight: 88
+            ),
+            88
+        )
+    }
+}
+
+final class ChatMotionTests: XCTestCase {
+    func testEveryCurveSnapsUnderReduceMotion() {
+        XCTAssertNil(ChatMotion.press(duration: 0.2, reduceMotion: true))
+        XCTAssertNil(ChatMotion.quickState(reduceMotion: true))
+        XCTAssertNil(ChatMotion.disclosure(reduceMotion: true))
+        XCTAssertNil(ChatMotion.composerChrome(reduceMotion: true))
+        XCTAssertNil(ChatMotion.scrollToLatest(reduceMotion: true))
+        XCTAssertNil(ChatMotion.streamingFollow(reduceMotion: true))
+        XCTAssertNil(ChatMotion.clarificationToggle(reduceMotion: true))
+    }
+
+    func testCurvesKeepTheirUnreducedTiming() {
+        XCTAssertEqual(ChatMotion.press(duration: 0.2, reduceMotion: false), .smooth(duration: 0.2, extraBounce: 0))
+        XCTAssertEqual(ChatMotion.quickState(reduceMotion: false), .easeInOut(duration: 0.16))
+        XCTAssertEqual(ChatMotion.disclosure(reduceMotion: false), .smooth(duration: 0.18, extraBounce: 0))
+        XCTAssertEqual(ChatMotion.composerChrome(reduceMotion: false), .smooth(duration: 0.22, extraBounce: 0))
+        XCTAssertEqual(ChatMotion.scrollToLatest(reduceMotion: false), .easeOut(duration: 0.20))
+        XCTAssertEqual(ChatMotion.streamingFollow(reduceMotion: false), .easeOut(duration: 0.15))
+        XCTAssertEqual(ChatMotion.clarificationToggle(reduceMotion: false), .easeOut(duration: 0.22))
     }
 }

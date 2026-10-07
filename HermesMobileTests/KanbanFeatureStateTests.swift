@@ -215,6 +215,74 @@ final class KanbanFeatureStateTests: XCTestCase {
         XCTAssertFalse(state.isLoading)
     }
 
+    // MARK: - Returning to a loaded Board (#672)
+
+    func testReappearingWithALoadedBoardKeepsItWithoutRequests() async {
+        let client = KanbanClientStub()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.loadIfNeeded()
+        let loadedCards = state.allCards
+
+        await state.loadIfNeeded()
+
+        XCTAssertEqual(state.state, .compatible)
+        XCTAssertEqual(state.allCards, loadedCards)
+        let calls = await client.calls()
+        XCTAssertEqual(calls, [
+            .configuration,
+            .boards,
+            .board(KanbanBoardRequest(board: "main")),
+            .stats("main"),
+            .assignees("main")
+        ], "Returning to a loaded Board must not repeat the handshake.")
+    }
+
+    func testReappearingWithoutALoadedBoardColdLoadsAgain() async {
+        let client = KanbanClientStub(configurationResult: .failure(CancellationError()))
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.loadIfNeeded()
+        XCTAssertEqual(state.state, .idle)
+
+        await state.loadIfNeeded()
+
+        let calls = await client.calls()
+        XCTAssertEqual(calls, [.configuration, .configuration])
+    }
+
+    func testReappearingAfterACancelledSupplementaryReadFinishesItWithoutColdLoad() async {
+        let client = KanbanClientStub(cancelsFirstStatsRead: true)
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await Task { await state.loadIfNeeded() }.value
+        XCTAssertNotNil(state.snapshot)
+        XCTAssertNil(state.assigneeHistory)
+
+        await state.loadIfNeeded()
+
+        XCTAssertNotNil(state.stats)
+        XCTAssertNotNil(state.assigneeHistory)
+        let calls = await client.calls()
+        XCTAssertEqual(calls, [
+            .configuration, .boards, .board(KanbanBoardRequest(board: "main")), .stats("main"),
+            .board(KanbanBoardRequest(board: "main")), .stats("main"), .assignees("main")
+        ], "Finishing the reads must keep the loaded Board instead of repeating the handshake.")
+    }
+
+    func testReappearingWithALoadedBoardKeepsArchiveUndo() async throws {
+        let client = ImmediateMutationClient(statusResults: [
+            .success(mutationDecode(#"{"task":{"id":"CARD-1","status":"archived"}}"#))
+        ])
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.loadIfNeeded()
+        let card = try XCTUnwrap(state.allCards.first { $0.cardID == "CARD-1" })
+        await state.archiveCard(card)
+        XCTAssertTrue(state.hasAvailableArchiveUndo)
+
+        await state.loadIfNeeded()
+
+        XCTAssertTrue(state.hasAvailableArchiveUndo)
+        XCTAssertFalse(state.allCards.contains { $0.cardID == card.cardID })
+    }
+
     func testStatusSearchUnknownStatusAndClearFiltersUseLoadedBoardData() async {
         let state = KanbanFeatureState(
             server: URL(string: "https://example.test")!,
@@ -222,7 +290,13 @@ final class KanbanFeatureStateTests: XCTestCase {
         )
         await state.load()
 
-        XCTAssertEqual(Array(state.availableStatuses.prefix(6)), KanbanFeatureState.liveStatuses)
+        // A webui Board keeps its configured six Columns; Scheduled and Review are Hermes's.
+        XCTAssertEqual(
+            Array(state.availableStatuses.prefix(6)),
+            ["triage", "todo", "ready", "running", "blocked", "done"]
+        )
+        XCTAssertFalse(state.availableStatuses.contains("scheduled"))
+        XCTAssertFalse(state.availableStatuses.contains("review"))
         XCTAssertTrue(state.availableStatuses.contains("future"))
         state.selectedStatus = "ready"
         for query in ["CARD-1", "Status Focus", "markdown", "builder", "mobile"] {
@@ -306,6 +380,8 @@ final class KanbanFeatureStateTests: XCTestCase {
         XCTAssertNil(state.stats)
         XCTAssertNil(state.assigneeHistory)
         XCTAssertTrue(state.isRefreshing)
+        // With no Cards on screen, the list shows the loading row.
+        XCTAssertTrue(state.showsBoardLoadingRow)
 
         await client.resumeReleaseRead()
         await switchBoard.value
@@ -355,6 +431,23 @@ final class KanbanFeatureStateTests: XCTestCase {
         await client.resumeDeferredRead()
         await stale.value
         XCTAssertEqual(state.allCards.first?.cardID, "NEW")
+    }
+
+    func testFilterChangeShowsTheLoadingRowOverTheOldFilterSnapshot() async {
+        let client = DeferredBoardClient()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.load()
+
+        let filter = Task { await state.setTenantFilter("ops") }
+        await client.waitForDeferredRead()
+
+        // The Cards on screen came from the unfiltered read, so the list says it is loading.
+        XCTAssertNotNil(state.snapshot)
+        XCTAssertTrue(state.showsBoardLoadingRow)
+
+        await client.resumeDeferredRead()
+        await filter.value
+        XCTAssertFalse(state.showsBoardLoadingRow)
     }
 
     func testCanonicalStatusAndCardAccessibilityCopy() throws {
@@ -570,6 +663,35 @@ final class KanbanFeatureStateTests: XCTestCase {
             .none, .warning,
             .none, .warning, .critical
         ])
+    }
+
+    /// A Hermes host sends `age` as `{created_age_seconds, started_age_seconds, …}` and webui
+    /// forwards the same dict as `age_seconds`. Running reads the started age, every other
+    /// Status the created age.
+    func testAgeDictionaryDrivesStalenessOnHermesAndWebUI() throws {
+        let snapshot: KanbanBoardSnapshot = mutationDecode("""
+        {"columns":[
+          {"name":"running","tasks":[
+            {"id":"hermes-running","status":"running","age":{"created_age_seconds":90000,"started_age_seconds":700,"time_to_complete_seconds":null}},
+            {"id":"webui-running","status":"running","age_seconds":{"created_age_seconds":10,"started_age_seconds":3600},"age":{"created_age_seconds":10,"started_age_seconds":3600}},
+            {"id":"not-started","status":"running","age":{"created_age_seconds":90000,"started_age_seconds":null}}]},
+          {"name":"ready","tasks":[{"id":"hermes-ready","status":"ready","age":{"created_age_seconds":3600,"started_age_seconds":null}}]},
+          {"name":"blocked","tasks":[{"id":"webui-blocked","status":"blocked","age_seconds":{"created_age_seconds":86400,"started_age_seconds":5}}]},
+          {"name":"todo","tasks":[{"id":"hermes-todo","status":"todo","age":{"created_age_seconds":999999}}]}
+        ]}
+        """)
+        let cards = snapshot.columns?.flatMap { $0.cards ?? [] } ?? []
+
+        XCTAssertEqual(cards.map(\.staleness), [.warning, .critical, .none, .warning, .critical, .none])
+        XCTAssertEqual(cards.first?.ageSeconds, 700, "a running Card shows how long it has run")
+        XCTAssertEqual(cards.last?.ageSeconds, 999_999)
+    }
+
+    func testScheduledAndReviewAreKnownStatusesWithTheirOwnNames() {
+        XCTAssertEqual(KanbanStatusPresentation("scheduled").title, String(localized: "Scheduled"))
+        XCTAssertEqual(KanbanStatusPresentation("review").title, String(localized: "Review"))
+        XCTAssertTrue(KanbanStatus(rawValue: "scheduled").isSupported)
+        XCTAssertTrue(KanbanStatus(rawValue: "review").isSupported)
     }
 
     func testPreviewDispatchIsOptionalSingleFlightTimestampedAndBecomesStaleAfterRefresh() async {
@@ -2125,16 +2247,19 @@ private actor KanbanClientStub: KanbanDataClient {
     private let configurationResult: Result<KanbanConfiguration, Error>
     private let boardsResult: Result<KanbanBoardsResponse, Error>
     private let boardResult: Result<KanbanBoardSnapshot, Error>
+    private var cancelsNextStatsRead: Bool
     private var recordedCalls: [Call] = []
 
     init(
         configurationResult: Result<KanbanConfiguration, Error> = .success(KanbanFixtures.configuration),
         boardsResult: Result<KanbanBoardsResponse, Error> = .success(KanbanFixtures.boards),
-        boardResult: Result<KanbanBoardSnapshot, Error> = .success(KanbanFixtures.snapshot)
+        boardResult: Result<KanbanBoardSnapshot, Error> = .success(KanbanFixtures.snapshot),
+        cancelsFirstStatsRead: Bool = false
     ) {
         self.configurationResult = configurationResult
         self.boardsResult = boardsResult
         self.boardResult = boardResult
+        self.cancelsNextStatsRead = cancelsFirstStatsRead
     }
 
     func kanbanConfiguration() throws -> KanbanConfiguration {
@@ -2152,8 +2277,14 @@ private actor KanbanClientStub: KanbanDataClient {
         return try boardResult.get()
     }
 
-    func kanbanStats(board: String) -> KanbanStats {
+    func kanbanStats(board: String) throws -> KanbanStats {
         recordedCalls.append(.stats(board))
+        if cancelsNextStatsRead {
+            cancelsNextStatsRead = false
+            // Models a pop that cancels the Board's `.task` after the snapshot arrived.
+            withUnsafeCurrentTask { $0?.cancel() }
+            throw CancellationError()
+        }
         return KanbanFixtures.stats
     }
 
