@@ -143,3 +143,166 @@ final class WatchCompanionGlanceMappingTests: XCTestCase {
         XCTAssertEqual(glance.dailyTokens, [1, 10])
     }
 }
+
+final class WatchVoiceNoteTranscriptionTests: XCTestCase {
+    func testServerFirstKeepsTheServerTranscript() async throws {
+        let text = try await WatchVoiceNoteTranscription.transcript(
+            preference: .serverFirst,
+            speechAuthorized: true,
+            onDeviceSupported: true,
+            server: { "from the server" },
+            onDevice: { XCTFail("on-device should wait until the server fails"); return "" }
+        )
+        XCTAssertEqual(text, "from the server")
+    }
+
+    func testServerFailureUsesOnDeviceWhenSpeechIsAlreadyAllowed() async throws {
+        let text = try await WatchVoiceNoteTranscription.transcript(
+            preference: .serverFirst,
+            speechAuthorized: true,
+            onDeviceSupported: true,
+            server: { throw WatchCompanionError.backend(.invalidResponse) },
+            onDevice: { "from the phone" }
+        )
+        XCTAssertEqual(text, "from the phone")
+    }
+
+    func testOnDeviceIsSkippedUntilSpeechPermissionAlreadyExists() async {
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .serverFirst,
+                speechAuthorized: false,
+                onDeviceSupported: true,
+                server: { throw WatchCompanionError.backend(.invalidResponse) },
+                onDevice: { XCTFail("a locked phone cannot ask for speech permission"); return "nope" }
+            )
+            XCTFail("expected the server failure to surface")
+        } catch {
+            XCTAssertEqual(error as? WatchCompanionError, .backend(.invalidResponse))
+        }
+    }
+
+    func testOnDeviceOnlyDoesNotCallTheServer() async throws {
+        let text = try await WatchVoiceNoteTranscription.transcript(
+            preference: .onDeviceOnly,
+            speechAuthorized: true,
+            onDeviceSupported: true,
+            server: { XCTFail("on-device only should not call the server"); return "" },
+            onDevice: { "from the phone" }
+        )
+        XCTAssertEqual(text, "from the phone")
+    }
+
+    func testOnDeviceOnlyWithoutPermissionDoesNotCallEitherProvider() async {
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .onDeviceOnly,
+                speechAuthorized: false,
+                onDeviceSupported: true,
+                server: { XCTFail("on-device only must not call the server"); return "" },
+                onDevice: { XCTFail("a locked phone cannot ask for speech permission"); return "" }
+            )
+            XCTFail("expected failure")
+        } catch {
+            XCTAssertEqual(error as? WatchCompanionError, .backend(.invalidResponse))
+        }
+    }
+
+    func testOnDeviceFirstUsesThePhoneBeforeTheServer() async throws {
+        let text = try await WatchVoiceNoteTranscription.transcript(
+            preference: .onDeviceFirst,
+            speechAuthorized: true,
+            onDeviceSupported: true,
+            server: { XCTFail("on-device first should not call the server yet"); return "" },
+            onDevice: { "from the phone" }
+        )
+        XCTAssertEqual(text, "from the phone")
+    }
+
+    func testOnDeviceFirstFallsBackToTheServer() async throws {
+        let text = try await WatchVoiceNoteTranscription.transcript(
+            preference: .onDeviceFirst,
+            speechAuthorized: true,
+            onDeviceSupported: true,
+            server: { "from the server" },
+            onDevice: { throw WatchCompanionError.backend(.invalidResponse) }
+        )
+        XCTAssertEqual(text, "from the server")
+    }
+
+    func testBlankTranscriptsFailInsteadOfSendingEmptyText() async {
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .serverFirst,
+                speechAuthorized: true,
+                onDeviceSupported: true,
+                server: { "  \n" },
+                onDevice: { " " }
+            )
+            XCTFail("blank text is not a transcript")
+        } catch {
+            XCTAssertEqual(error as? WatchCompanionError, .backend(.invalidResponse))
+        }
+    }
+
+    func testCancellationDoesNotFallThrough() async {
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .onDeviceFirst,
+                speechAuthorized: true,
+                onDeviceSupported: true,
+                server: { XCTFail("a cancelled attempt must not try the next provider"); return "" },
+                onDevice: { throw CancellationError() }
+            )
+            XCTFail("expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testATranscriptIsDroppedWhenTheAttemptIsCancelled() async {
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .serverFirst,
+                speechAuthorized: true,
+                onDeviceSupported: true,
+                server: {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return "hello"
+                },
+                onDevice: { XCTFail("must not fall through after cancellation"); return "nope" }
+            )
+            XCTFail("expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testTheLaterFailureIsWhatSurfaces() async {
+        struct Later: Error {}
+        do {
+            _ = try await WatchVoiceNoteTranscription.transcript(
+                preference: .serverFirst,
+                speechAuthorized: true,
+                onDeviceSupported: true,
+                server: { throw WatchCompanionError.backend(.timeout) },
+                onDevice: { throw Later() }
+            )
+            XCTFail("expected failure")
+        } catch is Later {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testServerTranscriptKeepsTextWhenAnErrorIsAlsoPresent() {
+        XCTAssertEqual(
+            WatchVoiceNoteTranscription.serverTranscriptText(transcript: " from the server ", error: "partial"),
+            "from the server"
+        )
+        XCTAssertNil(WatchVoiceNoteTranscription.serverTranscriptText(transcript: " ", error: "no speech"))
+        XCTAssertNil(WatchVoiceNoteTranscription.serverTranscriptText(transcript: nil, error: nil))
+    }
+}

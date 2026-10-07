@@ -840,11 +840,25 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func transcribeAudio(urlString: String, data: Data, filename: String) async throws -> String {
+        let raw = UserDefaults.standard.string(forKey: ComposerSTTProviderPreference.storageKey) ?? ""
+        let preference = ComposerSTTProviderPreference.storedValue(raw)
+        // Status only. Requesting authorization would prompt a locked phone.
+        let speechAuthorized = await WatchVoiceNoteTranscription.speechAlreadyAuthorized()
+        return try await WatchVoiceNoteTranscription.transcript(
+            preference: preference,
+            speechAuthorized: speechAuthorized,
+            onDeviceSupported: speechAuthorized,
+            server: { try await self.serverTranscript(urlString: urlString, data: data, filename: filename) },
+            onDevice: { try await WatchVoiceNoteTranscription.recognizeOnDevice(data: data) }
+        )
+    }
+
+    private func serverTranscript(urlString: String, data: Data, filename: String) async throws -> String {
         let response = try await client(for: urlString).transcribeAudio(data: data, filename: filename)
-        if let error = response.error, !error.isEmpty {
-            throw WatchCompanionError.backend(.invalidResponse)
-        }
-        guard let text = response.transcript?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+        guard let text = WatchVoiceNoteTranscription.serverTranscriptText(
+            transcript: response.transcript,
+            error: response.error
+        ) else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
         return text
