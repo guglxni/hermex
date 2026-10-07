@@ -112,6 +112,21 @@ public struct RegistrySnapshot: Hashable, Codable, Sendable {
         self.entries = entries
     }
 
+    /// What the watch substitutes when the phone does not answer. A real
+    /// registry with no servers uses the phone's epoch and a live revision.
+    public static func unavailableWake() -> RegistrySnapshot {
+        try! RegistrySnapshot(
+            epoch: InstallationEpoch(rawValue: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))),
+            revision: Revision(0),
+            generatedAt: Date(timeIntervalSince1970: 1),
+            entries: []
+        )
+    }
+
+    public var isUnavailableWake: Bool {
+        self == Self.unavailableWake()
+    }
+
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, epoch, revision, generatedAt, entries
     }

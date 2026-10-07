@@ -53,5 +53,7 @@ final class WatchVoiceCaptureTests: XCTestCase {
         XCTAssertTrue(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: attempt))
         XCTAssertFalse(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: nil))
         XCTAssertFalse(WatchVoiceStartGate.shouldBeginRecording(attempt: attempt, currentAttempt: UUID()))
+        XCTAssertTrue(WatchVoiceStartGate.shouldAcceptNewAttempt(startInFlight: false))
+        XCTAssertFalse(WatchVoiceStartGate.shouldAcceptNewAttempt(startInFlight: true))
     }
 }

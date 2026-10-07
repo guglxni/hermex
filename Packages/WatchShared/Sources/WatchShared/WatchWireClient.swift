@@ -359,12 +359,7 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
     }
 
     private func emptyRegistry() -> RegistrySnapshot {
-        try! RegistrySnapshot(
-            epoch: InstallationEpoch(rawValue: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))),
-            revision: Revision(0),
-            generatedAt: Date(timeIntervalSince1970: 1),
-            entries: []
-        )
+        RegistrySnapshot.unavailableWake()
     }
 
     /// Translates a non-envelope reply into the most specific watch error so the

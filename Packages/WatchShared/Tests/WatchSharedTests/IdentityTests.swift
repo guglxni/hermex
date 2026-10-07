@@ -488,4 +488,16 @@ private func semanticIdentitySession() throws -> SessionKey {
         #expect(decoded == value)
         #expect(throws: IdentityValidationError.blankIdentifier) { try WorkspaceHandle(" ") }
     }
+
+    @Test func unavailableWakeIsNotAnEmptyRegistry() throws {
+        let wake = RegistrySnapshot.unavailableWake()
+        #expect(wake.isUnavailableWake)
+        let removed = try RegistrySnapshot(
+            epoch: InstallationEpoch(rawValue: UUID()),
+            revision: Revision(2),
+            generatedAt: Date(timeIntervalSince1970: 20),
+            entries: []
+        )
+        #expect(!removed.isUnavailableWake)
+    }
 }

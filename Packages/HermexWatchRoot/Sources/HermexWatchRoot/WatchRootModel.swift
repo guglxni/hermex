@@ -1358,15 +1358,22 @@ public final class WatchRootModel {
 
     private func loadRegistry(using service: any WatchCompanionServicing) async {
         let snapshot = await service.registry()
+        applyRegistry(snapshot)
+        if !snapshot.entries.isEmpty, state == .ready {
+            await loadSessions()
+        }
+    }
+
+    private func applyRegistry(_ snapshot: RegistrySnapshot) {
         if snapshot.entries.isEmpty {
-            // A failed wake returns the same empty snapshot as a phone with
-            // no servers. Check the board we already showed before replacing
-            // it, or Stop and the session list disappear with the failure.
-            if servers.isEmpty {
-                registryRevision = snapshot.revision
-                state = .setupRequired
-                adopt(nil)
+            // A failed wake is the unavailable placeholder. A confirmed empty
+            // registry means the phone has no servers left, so the board goes.
+            if !servers.isEmpty, snapshot.isUnavailableWake {
+                return
             }
+            registryRevision = snapshot.revision
+            state = .setupRequired
+            adopt(nil)
             return
         }
         servers = snapshot.entries
@@ -1382,7 +1389,6 @@ public final class WatchRootModel {
         }
         state = .ready
         phoneStatusNote = nil
-        await loadSessions()
     }
 
     private func adopt(_ scope: ServerScope?) {
@@ -1437,6 +1443,10 @@ public final class WatchRootModel {
     func reloadRegistryForTesting() async {
         guard let link else { return }
         await loadRegistry(using: link.makeService())
+    }
+
+    func applyRegistrySnapshotForTesting(_ snapshot: RegistrySnapshot) {
+        applyRegistry(snapshot)
     }
 }
 

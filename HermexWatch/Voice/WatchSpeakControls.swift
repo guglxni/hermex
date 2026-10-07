@@ -26,6 +26,7 @@ struct WatchSpeakControls: View {
     /// Cleared when the screen goes away, so a late microphone grant cannot
     /// start recording after Cancel is no longer on screen.
     @State private var voiceAttempt: UUID?
+    @State private var voiceStartInFlight = false
 
     var body: some View {
         Group {
@@ -344,7 +345,10 @@ struct WatchSpeakControls: View {
     }
 
     private func startVoice() async {
+        guard WatchVoiceStartGate.shouldAcceptNewAttempt(startInFlight: voiceStartInFlight) else { return }
         guard capture.phase == .idle || isFailed else { return }
+        voiceStartInFlight = true
+        defer { voiceStartInFlight = false }
         let attempt = UUID()
         voiceAttempt = attempt
         speaker.stop()

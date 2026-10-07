@@ -958,9 +958,9 @@ extension WatchRootModelTests {
         XCTAssertEqual(backend.controlledTasks.map(\.jobID), ["job-1"])
     }
 
-    /// A failed phone wake is an empty registry, the same shape as no servers.
-    /// A board that was already loaded, including its Stop control, stays.
-    func testEmptyRegistryRefreshKeepsStopOnALoadedBoard() async throws {
+    /// The phone confirmed it has no servers. That is not a failed wake, so
+    /// the old board and its Stop control go away.
+    func testConfirmedEmptyRegistryClearsStop() async throws {
         let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
         let backend = RootScriptedBackend(accounts: [account])
         backend.sessionsByURL = ["https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")]]
@@ -976,10 +976,29 @@ extension WatchRootModelTests {
         backend.accounts = []
         await model.reloadRegistryForTesting()
 
+        XCTAssertEqual(model.state, .setupRequired)
+        XCTAssertEqual(model.primaryMessage, "Set up on iPhone")
+        XCTAssertNil(model.activeRun(for: session))
+    }
+
+    func testFailedWakeKeepsStopOnALoadedBoard() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        backend.sessionsByURL = ["https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")]]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        let session = try XCTUnwrap(model.sessions.first)
+        let run = await model.send(text: "go", to: session)
+        XCTAssertNotNil(run)
+
+        model.applyRegistrySnapshotForTesting(RegistrySnapshot.unavailableWake())
+
         XCTAssertEqual(model.state, .ready)
-        XCTAssertNotEqual(model.primaryMessage, "Set up on iPhone")
         XCTAssertEqual(model.sessions.map(\.title), ["Alpha session"])
         XCTAssertEqual(model.activeRun(for: session), run)
+        XCTAssertTrue(RegistrySnapshot.unavailableWake().isUnavailableWake)
     }
 
     func testImageCacheKeyIncludesTheSessionAndDigest() throws {

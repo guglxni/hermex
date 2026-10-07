@@ -36,6 +36,12 @@ public enum WatchVoiceStartGate {
     public static func shouldBeginRecording(attempt: UUID, currentAttempt: UUID?) -> Bool {
         currentAttempt == attempt
     }
+
+    /// Permission is still in flight. A second tap must not start another
+    /// recorder that the first attempt can then cancel.
+    public static func shouldAcceptNewAttempt(startInFlight: Bool) -> Bool {
+        !startInFlight
+    }
 }
 
 @MainActor
