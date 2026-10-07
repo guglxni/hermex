@@ -45,6 +45,12 @@ struct HermesMobileApp: App {
     @State private var authManager = AuthManager()
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
 
+    init() {
+        // Activate before the scene appears so a watch message can launch
+        // Hermex in the background while the iPhone stays locked.
+        PhoneWatchConnectivityHost.shared.activate()
+    }
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG

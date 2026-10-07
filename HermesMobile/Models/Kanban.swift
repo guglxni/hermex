@@ -527,6 +527,7 @@ struct KanbanColumn: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case name
         case cards = "tasks"
+        case alternateCards = "cards"
     }
 
     init(name: String?, cards: [KanbanCard]?) {
@@ -537,9 +538,28 @@ struct KanbanColumn: Decodable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = container.decodeLossyStringIfPresent(forKey: .name)
-        cards = try? container.decodeIfPresent([KanbanCard].self, forKey: .cards)
+        cards = Self.cards(in: container, key: .cards) ?? Self.cards(in: container, key: .alternateCards)
+    }
+
+    /// One bad Card must not drop the rest of the column.
+    private static func cards(
+        in container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) -> [KanbanCard]? {
+        guard var array = try? container.nestedUnkeyedContainer(forKey: key) else { return nil }
+        var decoded: [KanbanCard] = []
+        while !array.isAtEnd {
+            if let card = try? array.decode(KanbanCard.self) {
+                decoded.append(card)
+            } else {
+                _ = try? array.decode(DiscardedKanbanValue.self)
+            }
+        }
+        return decoded
     }
 }
+
+private struct DiscardedKanbanValue: Decodable {}
 
 struct KanbanCard: Decodable, Equatable, Sendable {
     let cardID: String?
@@ -565,6 +585,7 @@ struct KanbanCard: Decodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case cardID = "id"
+        case taskID = "taskId"
         case title, body, tenant, priority, commentCount, linkCounts, ageSeconds
         case status
         case assignee
@@ -621,6 +642,7 @@ struct KanbanCard: Decodable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         cardID = container.decodeLossyStringIfPresent(forKey: .cardID)
+            ?? container.decodeLossyStringIfPresent(forKey: .taskID)
         title = container.decodeLossyStringIfPresent(forKey: .title)
         status = container.decodeLossyStringIfPresent(forKey: .status).map(KanbanStatus.init(rawValue:))
         assignee = container.decodeLossyStringIfPresent(forKey: .assignee)

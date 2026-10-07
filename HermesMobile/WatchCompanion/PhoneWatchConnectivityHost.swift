@@ -54,10 +54,55 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
             replyHandler(["error": "invalidEnvelope"])
             return
         }
-        Task {
-            let reply = await handle(data)
-            replyHandler(["data": reply])
+        // The reply has to be invoked on this thread before the method returns.
+        // A Task that answers later is dropped: the watch never gets the list
+        // and Tasks / Kanban stay on the spinner. Voice notes stay deferred
+        // because they wait on a file already handed to this same queue.
+        if Self.needsDeferredReply(data) {
+            Task {
+                let reply = await handle(data)
+                replyHandler(["data": reply])
+            }
+            return
         }
+        let payload = ReplyPayload()
+        let ready = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            payload.store(await self.handle(data))
+            ready.signal()
+        }
+        let answered: Bool
+        if Thread.isMainThread {
+            // Pump the main run loop so a hop onto it can finish, without
+            // returning from this method before the reply is sent.
+            let deadline = Date().addingTimeInterval(30)
+            while !payload.isReady, Date() < deadline {
+                RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.05))
+            }
+            answered = payload.isReady
+        } else {
+            answered = ready.wait(timeout: .now() + 30) == .success
+        }
+        replyHandler(["data": answered ? payload.load() : Self.readFailedReply()])
+    }
+
+    /// Transcription and photo upload wait on work that is already in flight
+    /// on this session. Every other read answers before this method returns.
+    private static func needsDeferredReply(_ data: Data) -> Bool {
+        guard let message = try? JSONDecoder().decode(WatchWireMessage.self, from: data) else {
+            return false
+        }
+        switch message {
+        case .transcribe, .transcribeFile, .sendPhoto, .sendPhotoFile:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func readFailedReply() -> Data {
+        let failure = WatchWireReply.failure(.uncertain(code: "readFailed"))
+        return (try? JSONEncoder().encode(failure)) ?? Data()
     }
 
     func session(_ session: WCSession, didReceive file: WCSessionFile) {
@@ -83,7 +128,15 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
             let message = try JSONDecoder().decode(WatchWireMessage.self, from: data)
             let resolved = await resolveFileHop(message)
             let reply = await dispatcher.handle(resolved)
-            return try JSONEncoder().encode(reply)
+            let encoded = try JSONEncoder().encode(reply)
+            // A reply past the sendMessage ceiling is discarded with no error
+            // on the watch. A small failure still arrives, so the glance can
+            // show Try again instead of spinning.
+            if encoded.count <= WatchVoiceNoteWire.maximumDeliverableReplyBytes {
+                return encoded
+            }
+            let failure = WatchWireReply.failure(.uncertain(code: "readFailed"))
+            return try JSONEncoder().encode(failure)
         } catch {
             let failure = WatchWireReply.failure(.invalidEnvelope(code: "decodeFailed"))
             return (try? JSONEncoder().encode(failure)) ?? Data()
@@ -126,5 +179,31 @@ final class PhoneWatchConnectivityHost: NSObject, WCSessionDelegate, @unchecked 
             group.cancelAll()
             return result
         }
+    }
+}
+
+/// The session thread and the worker that builds a reply share this buffer.
+private final class ReplyPayload: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    private var ready = false
+
+    func store(_ data: Data) {
+        lock.lock()
+        self.data = data
+        ready = true
+        lock.unlock()
+    }
+
+    var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ready
+    }
+
+    func load() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
     }
 }

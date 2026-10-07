@@ -9,6 +9,12 @@ import Foundation
 public enum WatchVoiceNoteWire: Sendable {
     public static let maximumInlineAudioBytes = 48_000
     public static let maximumSendMessagePayloadBytes = 65_536
+    /// Encoded glance or session snapshot. The reply envelope sits on top of
+    /// this, and a `sendMessage` past the payload ceiling is dropped without
+    /// calling either handler, so the watch waits on a spinner.
+    public static let maximumSnapshotJSONBytes = 40_000
+    /// Full JSON reply, leaving room for the plist dictionary around it.
+    public static let maximumDeliverableReplyBytes = 60_000
     public static let fileTransferMetadataKey = "hermexVoiceTransferID"
 
     public static func requiresFileTransfer(_ request: WatchVoiceNoteRequest) -> Bool {

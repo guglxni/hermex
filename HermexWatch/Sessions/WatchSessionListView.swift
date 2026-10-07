@@ -39,37 +39,39 @@ struct WatchSessionListView: View {
             .accessibilityIdentifier("createSession")
             .disabled(isCreating || !model.canMutate)
 
-            if model.sessions.isEmpty {
-                Text("No sessions")
-                    .foregroundStyle(.secondary)
+            if let error = model.sidebarErrorCopy {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .listRowBackground(Color.clear)
             }
-            ForEach(model.sessions, id: \.key) { session in
-                NavigationLink {
-                    WatchSessionDetailView(model: model, session: session)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Text(session.title)
-                                .font(.headline)
-                            Spacer(minLength: 4)
-                            if WatchNowSession.isRunning(session.runState) {
-                                Image(systemName: "ellipsis.circle")
-                                    .foregroundStyle(.orange)
-                                    .accessibilityLabel("Running")
-                            } else if WatchNowSession.needsAttention(session) {
-                                Image(systemName: "exclamationmark.circle")
-                                    .foregroundStyle(.yellow)
-                                    .accessibilityLabel("Needs you")
-                            } else if session.isPinned {
-                                Image(systemName: "pin.fill")
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Pinned")
-                            }
-                        }
-                        if let profile = session.profile {
-                            Text(profile)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+            if !model.hasLoadedSessions, model.sessions.isEmpty {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .listRowBackground(Color.clear)
+            } else if model.sessions.isEmpty, model.lastErrorCode != "sessionsUnavailable" {
+                VStack(spacing: 6) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text("No sessions yet")
+                        .font(.footnote)
+                    Text("Tap + to start one.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .listRowBackground(Color.clear)
+                .accessibilityElement(children: .combine)
+            }
+            ForEach(groups, id: \.title) { group in
+                Section(group.title) {
+                    ForEach(group.sessions, id: \.key) { session in
+                        NavigationLink {
+                            WatchSessionDetailView(model: model, session: session)
+                        } label: {
+                            sessionRow(session)
                         }
                     }
                 }
@@ -101,6 +103,65 @@ struct WatchSessionListView: View {
             await model.refreshFromList()
             WatchWidgetSnapshotPublisher.publish(model)
         }
+    }
+
+    /// Live work first so "what needs me" is the first thing under the wrist,
+    /// then pinned, then everything else in server order.
+    private var groups: [(title: String, sessions: [WatchSessionSummary])] {
+        var active: [WatchSessionSummary] = []
+        var pinned: [WatchSessionSummary] = []
+        var recent: [WatchSessionSummary] = []
+        for session in model.sessions {
+            if WatchNowSession.isRunning(session.runState) || WatchNowSession.needsAttention(session) {
+                active.append(session)
+            } else if session.isPinned {
+                pinned.append(session)
+            } else {
+                recent.append(session)
+            }
+        }
+        return [("Active", active), ("Pinned", pinned), ("Recent", recent)]
+            .filter { !$0.1.isEmpty }
+            .map { (title: $0.0, sessions: $0.1) }
+    }
+
+    private func sessionRow(_ session: WatchSessionSummary) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(session.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                if session.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Pinned")
+                }
+            }
+            HStack(spacing: 4) {
+                if let status = status(for: session) {
+                    Circle()
+                        .fill(status.tint)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                    Text(status.text)
+                        .foregroundStyle(status.tint)
+                } else if let updatedAt = session.updatedAt {
+                    Text(updatedAt, format: .relative(presentation: .numeric, unitsStyle: .abbreviated))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption2)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func status(for session: WatchSessionSummary) -> (text: String, tint: Color)? {
+        if WatchNowSession.isRunning(session.runState) { return ("Running", .orange) }
+        if WatchNowSession.needsAttention(session) { return ("Needs you", .yellow) }
+        return nil
     }
 
     private func createSession() async {

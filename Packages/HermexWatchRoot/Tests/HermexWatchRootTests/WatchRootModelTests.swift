@@ -138,7 +138,7 @@ final class WatchRootModelTests: XCTestCase {
         let createdSession = try XCTUnwrap(model.session(for: created))
 
         let standUpBlocks = await model.transcript(for: standUp)
-        XCTAssertEqual(standUpBlocks.count, 2)
+        XCTAssertEqual(standUpBlocks.count, 4)
         if case .text(_, _, let text) = standUpBlocks.first {
             XCTAssertEqual(text, "Summarize stand-up.")
         } else {
@@ -203,6 +203,111 @@ final class WatchRootModelTests: XCTestCase {
         XCTAssertEqual(model.sessions.map(\.title), ["Beta session"])
         XCTAssertEqual(model.nowSession?.key.scope, beta)
         XCTAssertFalse(model.sessions.contains(where: { $0.key.scope == alpha }))
+    }
+
+    /// A locked phone reports unreachable. That must not cancel the wake
+    /// already in flight, or the wrist shows "Set up on iPhone" while Hermex
+    /// is about to launch in the background.
+    func testUnreachableWhileConnectingKeepsTheWakeInFlight() {
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ToggleableLink(isReachable: false))
+        model.beginConnecting()
+
+        model.handleCompanionUnreachable()
+
+        XCTAssertEqual(model.state, .connecting)
+        XCTAssertNil(model.phoneStatusNote)
+    }
+
+    func testRebootBeforeUnlockDoesNotPretendThePhoneCanBeWoken() {
+        let model = WatchRootModel()
+        let link = ToggleableLink(isReachable: false, needsUnlockAfterReboot: true)
+        model.attachLinkWithoutRefreshingForTesting(link)
+        model.beginConnecting()
+
+        model.handleCompanionUnreachable()
+
+        XCTAssertEqual(model.state, .unavailable)
+        XCTAssertEqual(
+            model.phoneStatusNote,
+            "Unlock iPhone once after it restarts. It can stay locked after that."
+        )
+    }
+
+    /// Read aloud used to speak the 160-character Now preview, so a long reply
+    /// was cut off mid-sentence. It now reads the whole latest turn.
+    func testNowSpokenReplyIsTheWholeLatestAssistantTurn() async throws {
+        let (model, backend) = try await readyModelWithOneSession()
+        backend.transcriptBlocks = [
+            .init(id: "u", role: .user, text: "Status?"),
+            .init(id: "a1", role: .assistant, text: "First **part** of the reply."),
+            .init(id: "c", kind: .code(language: "swift", text: "let x = 1", isTruncated: false)),
+            .init(id: "a2", role: .assistant, text: "Then see [the notes](https://example.com/notes)."),
+        ]
+        await model.loadSessions()
+
+        XCTAssertEqual(model.nowSpokenReply, "First part of the reply.\nThen see the notes.")
+        XCTAssertNotNil(model.nowPreview)
+    }
+
+    func testNowSpokenReplyIsNilWhenTheLatestTurnIsTheUsers() async throws {
+        let (model, backend) = try await readyModelWithOneSession()
+        backend.transcriptBlocks = [
+            .init(id: "a", role: .assistant, text: "Earlier reply."),
+            .init(id: "u", role: .user, text: "New question"),
+        ]
+        await model.loadSessions()
+
+        XCTAssertNil(model.nowSpokenReply)
+    }
+
+    func testKanbanCardsArriveWithStatusKeys() async throws {
+        let (model, backend) = try await readyModelWithOneSession()
+        backend.kanban = [WatchPhoneKanbanCardGlance(id: "card-1", title: "Ship", status: "todo", assignee: "default", priority: 2)]
+
+        let cards = await model.loadKanbanCards()
+
+        XCTAssertEqual(cards.map(\.status), ["todo"])
+        XCTAssertEqual(cards.first?.assignee, "default")
+        XCTAssertEqual(cards.first?.priority, 2)
+    }
+
+    /// Task history belongs to the task screen: a failure returns nil for its
+    /// own Try again and never sets the model-wide error other screens read.
+    func testTaskRunsLoadOrFailWithoutTouchingTheSharedError() async throws {
+        let (model, backend) = try await readyModelWithOneSession()
+        backend.taskRuns = [WatchPhoneTaskRun(id: "run-1.md", finishedAt: Date(timeIntervalSince1970: 100), durationSeconds: 10)]
+
+        let runs = await model.loadTaskRuns(jobID: "job-1")
+        XCTAssertEqual(runs?.map(\.runID), ["run-1.md"])
+
+        backend.taskRuns = nil
+        let failed = await model.loadTaskRuns(jobID: "job-1")
+        XCTAssertNil(failed)
+        XCTAssertNil(model.lastErrorCode)
+    }
+
+    private func readyModelWithOneSession() async throws -> (WatchRootModel, RootScriptedBackend) {
+        let backend = RootScriptedBackend(accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")])
+        backend.sessionsByURL = ["https://alpha.example": [
+            WatchPhoneSessionRow(
+                sessionID: "s1",
+                title: "Planning",
+                profile: nil,
+                workspaceLabel: nil,
+                updatedAt: Date(timeIntervalSince1970: 20),
+                isPinned: false,
+                isArchived: false,
+                attention: false,
+                runState: nil
+            ),
+        ]]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        XCTAssertEqual(model.state, .ready)
+        return (model, backend)
     }
 
     func testActiveRunsStayIsolatedWhenSessionIDsCollide() async throws {
@@ -416,12 +521,28 @@ final class WatchRootModelTests: XCTestCase {
         XCTAssertNil(model.activeRun(for: session))
     }
 
+    func testLoadSessionsKeepsMoreThanTheOldTwentyRowCap() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        backend.sessionsByURL = [
+            "https://alpha.example": (0..<25).map { Self.row(sessionID: "s\($0)", title: "Session \($0)") },
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        await model.loadSessions()
+
+        XCTAssertEqual(model.sessions.count, 25)
+        XCTAssertNil(model.errorCopy)
+    }
+
     // MARK: - Blocker 1: reachability reconnects
 
     func testUnreachableAfterReadyPresentsUnavailableNotSetupRequired() {
         let model = WatchRootModel()
         let link = ToggleableLink(installed: true, isReachable: false)
-        model.attach(link: link)
+        model.attachLinkWithoutRefreshingForTesting(link)
         // Simulate a successful ready state.
         model.applyReadyStateForTesting(
             servers: [RegistryEntry(scope: Self.makeScope(), displayName: try! RedactedDisplayName("Alpha"))],
@@ -429,12 +550,28 @@ final class WatchRootModelTests: XCTestCase {
         )
         XCTAssertEqual(model.state, .ready)
 
-        // Phone becomes unreachable: do not lie that setup is missing.
+        // Phone becomes unreachable: keep the last ready surface. A locked
+        // phone is not "set up on iPhone" and it is not a blank watch.
         model.handleCompanionUnreachable()
 
-        XCTAssertEqual(model.state, .unavailable)
-        XCTAssertEqual(model.primaryMessage, "Hermex is unavailable")
-        XCTAssertNil(model.widgetSnapshot())
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNil(model.phoneStatusNote)
+        XCTAssertNotNil(model.widgetSnapshot())
+    }
+
+    func testLockedPhoneStillLoadsWhenHermexIsNotInTheForeground() async throws {
+        let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let backend = RootScriptedBackend(accounts: [account])
+        backend.sessionsByURL = ["https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")]]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let link = ToggleableLink(service: broker, isReachable: false)
+        let model = WatchRootModel()
+        model.attach(link: link)
+        await model.reloadRegistryForTesting()
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.sessions.map(\.title), ["Alpha session"])
+        XCTAssertNil(model.phoneStatusNote)
     }
 
     func testReachableAfterUnavailableRefreshes() async throws {
@@ -451,10 +588,11 @@ final class WatchRootModelTests: XCTestCase {
             servers: [RegistryEntry(scope: scope, displayName: try! RedactedDisplayName("Alpha"))],
             sessions: []
         )
-        // Go unavailable, then reachable again — refresh should reload sessions.
+        // A locked phone keeps the last ready board. Becoming reachable again
+        // still reloads sessions.
         link.isReachable = false
         model.handleCompanionUnreachable()
-        XCTAssertEqual(model.state, .unavailable)
+        XCTAssertEqual(model.state, .ready)
 
         link.isReachable = true
         model.handleCompanionReachable()
@@ -582,6 +720,202 @@ final class WatchRootModelTests: XCTestCase {
     }
 }
 
+extension WatchRootModelTests {
+    /// The iPhone bumps its registry revision on its own (server rename, an
+    /// active-server switch, a relaunched broker). Reads are fenced only on the
+    /// scope, so they keep working, while every write is fenced on the revision
+    /// — which used to leave the glances loading fine and every wrist action
+    /// silently rejected. The model must re-read the revision before a write.
+    func testWristWritesSurviveAnIPhoneRegistryRevisionBump() async throws {
+        let backend = RootScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")]
+        )
+        backend.sessionsByURL = [
+            "https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")],
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        let adopted = model.registryRevision
+
+        // The iPhone renames the server: same scope, new registry revision.
+        backend.accounts = [
+            WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha Studio"),
+        ]
+        _ = await broker.registry()
+
+        // Reads still succeed on the stale revision the watch is holding.
+        let tasks = await model.loadTasks()
+        XCTAssertTrue(tasks.isEmpty)
+
+        let toggled = await model.setSkillEnabled(name: "web-search", enabled: false)
+        let moved = await model.moveKanbanCard(cardID: "card-1", status: "Done")
+        let ran = await model.controlTask(jobID: "job-1", action: .run)
+        XCTAssertTrue(toggled)
+        XCTAssertTrue(moved)
+        XCTAssertTrue(ran)
+        XCTAssertEqual(backend.skillToggles.map(\.name), ["web-search"])
+        XCTAssertEqual(backend.kanbanMoves.map(\.status), ["Done"])
+        XCTAssertEqual(backend.controlledTasks.map(\.action), ["run"])
+        XCTAssertNil(model.lastErrorCode)
+        XCTAssertNotEqual(model.registryRevision, adopted)
+    }
+
+    func testWristWriteFailureSurfacesHonestCopy() async throws {
+        let model = WatchRootModel()
+        let backend = RootScriptedBackend(accounts: [])
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        model.applyReadyStateForTesting(
+            servers: [
+                RegistryEntry(
+                    scope: ServerScope(
+                        epoch: InstallationEpoch(rawValue: UUID()),
+                        server: ServerID(rawValue: UUID()),
+                        generation: try Generation(1)
+                    ),
+                    displayName: try RedactedDisplayName("Alpha")
+                ),
+            ],
+            sessions: []
+        )
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+
+        let toggled = await model.setSkillEnabled(name: "web-search", enabled: false)
+        XCTAssertFalse(toggled)
+        XCTAssertEqual(model.errorCopy, "Couldn’t update that skill.")
+        XCTAssertNil(model.sidebarErrorCopy)
+        let moved = await model.moveKanbanCard(cardID: "card-1", status: "Done")
+        XCTAssertFalse(moved)
+        XCTAssertEqual(model.errorCopy, "Couldn’t move that card.")
+        XCTAssertNil(model.sidebarErrorCopy)
+        let ran = await model.controlTask(jobID: "job-1", action: .run)
+        XCTAssertFalse(ran)
+        XCTAssertEqual(model.errorCopy, "Couldn’t update that task.")
+        XCTAssertNil(model.sidebarErrorCopy)
+    }
+
+    /// A glance that fails to load owns that failure. Now and Sessions were
+    /// repeating "Couldn't load this list." after Tasks or Kanban missed.
+    func testGlanceLoadFailureStaysOffNowAndSessions() async throws {
+        let backend = RootScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")]
+        )
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+
+        let tasks = await model.loadTasks()
+        XCTAssertTrue(tasks.isEmpty)
+        XCTAssertEqual(model.lastErrorCode, "glanceUnavailable")
+        XCTAssertEqual(model.errorCopy, "Couldn’t load this list.")
+        XCTAssertNil(model.sidebarErrorCopy)
+    }
+
+    /// A failed reply used to sit over Now as a banner until the next success,
+    /// so one bad send made the composer look permanently broken. Reply-control
+    /// failures now belong to the control that failed: off the Now banner, and
+    /// dropped the moment the user starts another attempt.
+    func testReplyControlFailuresStayOffNowAndClearOnRetry() async throws {
+        let model = WatchRootModel()
+        let backend = RootScriptedBackend(accounts: [])
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let scope = ServerScope(
+            epoch: InstallationEpoch(rawValue: UUID()),
+            server: ServerID(rawValue: UUID()),
+            generation: try Generation(1)
+        )
+        let session = try WatchSessionSummary(
+            key: SessionKey(scope: scope, sessionID: "a"),
+            title: "Alpha session",
+            profile: nil,
+            workspaceLabel: nil,
+            updatedAt: Date(timeIntervalSince1970: 20),
+            isPinned: false,
+            isArchived: false,
+            attention: false,
+            runState: nil
+        )
+        model.applyReadyStateForTesting(
+            servers: [RegistryEntry(scope: scope, displayName: try RedactedDisplayName("Alpha"))],
+            sessions: [session]
+        )
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+
+        // The phone has no account for this scope, so the send is rejected.
+        let run = await model.send(text: "go", to: session)
+        XCTAssertNil(run)
+        XCTAssertEqual(model.lastErrorCode, "sendRejected")
+        // The control shows it; Now does not echo it.
+        XCTAssertEqual(model.errorCopy, "Hermex didn’t accept that message.")
+        XCTAssertNil(model.sidebarErrorCopy)
+
+        // Starting another attempt drops it.
+        model.clearReplyControlError()
+        XCTAssertNil(model.lastErrorCode)
+        XCTAssertNil(model.errorCopy)
+    }
+
+    /// Clearing a reply failure must not swallow the failures Now still owns.
+    func testClearingAReplyErrorLeavesSessionsAndAuthErrorsOnNow() async throws {
+        let model = WatchRootModel()
+        let broker = PhoneCompanionBroker(
+            epoch: InstallationEpoch(rawValue: UUID()),
+            backend: AuthFailingBackend()
+        )
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+
+        XCTAssertEqual(model.lastErrorCode, "authRequired")
+        XCTAssertEqual(model.sidebarErrorCopy, "Sign in on iPhone to continue.")
+        model.clearReplyControlError()
+        XCTAssertEqual(model.lastErrorCode, "authRequired")
+        XCTAssertEqual(model.sidebarErrorCopy, "Sign in on iPhone to continue.")
+    }
+
+    func testReplyControlCopyIsAddressableWithoutTheLastErrorCode() {
+        XCTAssertEqual(WatchRootModel.errorCopy(for: "sendFailed"), "Couldn’t send. Try again.")
+        XCTAssertEqual(WatchRootModel.errorCopy(for: "stopFailed"), "Couldn’t stop the run.")
+        XCTAssertEqual(WatchRootModel.errorCopy(for: "nonsense"), "Something went wrong. Try again.")
+    }
+
+    #if DEBUG
+    /// The screenshot fixture has to simulate the write, not swallow it, or the
+    /// simulator can never show that an action reached the screen.
+    func testScreenshotFixtureWritesChangeTheGlanceState() async throws {
+        let model = WatchRootModel()
+        model.applyScreenshotFixture()
+
+        let ran = await model.controlTask(jobID: "digest", action: .run)
+        let digest = await model.loadTasks().first(where: { $0.key.jobID == "digest" })
+        XCTAssertTrue(ran)
+        XCTAssertEqual(digest?.running, true)
+
+        let paused = await model.controlTask(jobID: "backup", action: .pause)
+        let backup = await model.loadTasks().first(where: { $0.key.jobID == "backup" })
+        XCTAssertTrue(paused)
+        XCTAssertEqual(backup?.enabled, false)
+
+        let toggled = await model.setSkillEnabled(name: "calendar", enabled: true)
+        let calendar = await model.loadSkills().first(where: { $0.key.name == "calendar" })
+        XCTAssertTrue(toggled)
+        XCTAssertEqual(calendar?.enabled, true)
+
+        let moved = await model.moveKanbanCard(cardID: "c3", status: "done")
+        let card = await model.loadKanbanCards().first(where: { $0.id == "c3" })
+        XCTAssertTrue(moved)
+        XCTAssertEqual(card?.title, "Write release notes")
+        XCTAssertEqual(card?.status, "done")
+
+        let switched = await model.switchActiveProfile(name: "research")
+        let options = await model.loadComposerOptions()
+        XCTAssertTrue(switched)
+        XCTAssertEqual(options?.defaultProfileID?.rawValue, "research")
+    }
+    #endif
+}
+
 private struct UnavailableLink: WatchCompanionLinking {
     var isCompanionAvailable: Bool { false }
     var isReachable: Bool { false }
@@ -623,9 +957,22 @@ private final class RootScriptedBackend: WatchPhoneBackend, @unchecked Sendable 
     var sessionsByURL: [String: [WatchPhoneSessionRow]] = [:]
     var failUpload = false
     var startedAttachments: [WatchChatAttachment]?
+    var controlledTasks: [(jobID: String, action: String)] = []
+    var skillToggles: [(name: String, enabled: Bool)] = []
+    var kanbanMoves: [(cardID: String, status: String)] = []
 
     init(accounts: [WatchPhoneServerAccount]) {
         self.accounts = accounts
+    }
+
+    func controlTask(urlString: String, jobID: String, action: String) async throws {
+        controlledTasks.append((jobID, action))
+    }
+    func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws {
+        skillToggles.append((name, enabled))
+    }
+    func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+        kanbanMoves.append((cardID, status))
     }
 
     func servers() async -> [WatchPhoneServerAccount] { accounts }
@@ -659,8 +1006,16 @@ private final class RootScriptedBackend: WatchPhoneBackend, @unchecked Sendable 
         )
     }
     func cancelChat(urlString: String, streamID: String) async throws {}
+    var transcriptBlocks: [WatchPhoneTranscriptPage.Block] = []
     func transcript(urlString: String, sessionID: String, before: Int?, limit: Int) async throws -> WatchPhoneTranscriptPage {
-        WatchPhoneTranscriptPage(blocks: [], nextBefore: nil, isTruncated: false)
+        WatchPhoneTranscriptPage(blocks: transcriptBlocks, nextBefore: nil, isTruncated: false)
+    }
+    var kanban: [WatchPhoneKanbanCardGlance] = []
+    func listKanbanCards(urlString: String, limit: Int) async throws -> [WatchPhoneKanbanCardGlance] { kanban }
+    var taskRuns: [WatchPhoneTaskRun]?
+    func listTaskRuns(urlString: String, jobID: String, limit: Int) async throws -> [WatchPhoneTaskRun] {
+        guard let taskRuns else { throw WatchCompanionError.backend(.timeout) }
+        return taskRuns
     }
     func runPhase(urlString: String, sessionID: String, streamID: String) async throws -> (phase: WatchRunPhase, isTerminal: Bool) {
         (.responding, false)
@@ -675,13 +1030,22 @@ private final class ToggleableLink: WatchCompanionLinking, @unchecked Sendable {
     var isReachable: Bool
     private let service: (any WatchCompanionServicing)?
 
-    init(service: (any WatchCompanionServicing)? = nil, installed: Bool = true, isReachable: Bool = true) {
+    var needsUnlockAfterReboot: Bool
+
+    init(
+        service: (any WatchCompanionServicing)? = nil,
+        installed: Bool = true,
+        isReachable: Bool = true,
+        needsUnlockAfterReboot: Bool = false
+    ) {
         self.service = service
         self.installed = installed
         self.isReachable = isReachable
+        self.needsUnlockAfterReboot = needsUnlockAfterReboot
     }
 
     var isCompanionAvailable: Bool { installed }
+    var phoneNeedsUnlockAfterReboot: Bool { needsUnlockAfterReboot }
     func makeService() -> any WatchCompanionServicing {
         guard let service else { fatalError("no service attached") }
         return service

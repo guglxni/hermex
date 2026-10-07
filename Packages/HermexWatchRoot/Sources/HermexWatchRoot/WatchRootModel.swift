@@ -5,9 +5,27 @@ import WatchShared
 public protocol WatchCompanionLinking: Sendable {
     var isCompanionAvailable: Bool { get }
     var isReachable: Bool { get }
+    /// Apple blocks WatchConnectivity until the iPhone is unlocked once after
+    /// a reboot. A phone that is merely locked does not set this.
+    var phoneNeedsUnlockAfterReboot: Bool { get }
     func makeService() -> any WatchCompanionServicing
     func sendVoiceNote(_ request: WatchVoiceNoteRequest) async throws -> CommandReceipt<RunKey>
     func sendPhoto(_ request: WatchPhotoSendRequest) async throws -> CommandReceipt<RunKey>
+}
+
+public extension WatchCompanionLinking {
+    var phoneNeedsUnlockAfterReboot: Bool { false }
+}
+
+/// One Kanban read: the board chrome (name, columns, other boards) and its cards.
+public struct WatchKanbanBoardLoad: Sendable {
+    public var chrome: WatchKanbanBoardChrome
+    public var cards: [WatchKanbanCard]
+
+    public init(chrome: WatchKanbanBoardChrome, cards: [WatchKanbanCard]) {
+        self.chrome = chrome
+        self.cards = cards
+    }
 }
 
 @MainActor
@@ -17,14 +35,37 @@ public final class WatchRootModel {
     public private(set) var servers: [RegistryEntry]
     public private(set) var selectedScope: ServerScope?
     public private(set) var sessions: [WatchSessionSummary]
+    /// False until the first session read for this server settles. An empty
+    /// list before that is "still loading", not "No sessions yet".
+    public private(set) var hasLoadedSessions = false
     public private(set) var registryRevision: Revision
     public private(set) var lastErrorCode: String?
     public private(set) var nowPreview: String?
+    /// The Now session's latest assistant turn as speakable words, for Read
+    /// aloud. Separate from `nowPreview`, which is clipped to a glance line.
+    public private(set) var nowSpokenReply: String?
+    /// Set while the phone cannot answer right now. The last ready screen stays
+    /// up; this is the reason, not a reason to wipe it.
+    public private(set) var phoneStatusNote: String?
     public private(set) var focusedSessionKey: SessionKey?
 
     private var link: (any WatchCompanionLinking)?
     private var activeRunBySession: [SessionKey: RunKey] = [:]
     private var fixtureTranscriptBySessionID: [String: [WatchTranscriptBlock]] = [:]
+    private var fixtureGlances: FixtureGlances?
+
+    /// Screenshot-fixture data for the glances, so their layout can be checked
+    /// on a simulator with no paired phone.
+    private struct FixtureGlances {
+        var tasks: [WatchTaskSummary]
+        var kanban: [WatchSkillSummary]
+        var skills: [WatchSkillSummary]
+        var usage: WatchInsightsAggregate?
+        var memory: WatchMemoryDocument?
+        var composer: WatchComposerOptions?
+        var taskRuns: [String: [WatchTaskRun]] = [:]
+        var taskOutputs: [String: String] = [:]
+    }
     private var mediaCache: [String: Data] = [:]
     /// The watch has no server picker, so it follows whichever server the iPhone
     /// reports first (its active one). An explicit `select(_:)` pins the watch to
@@ -36,9 +77,11 @@ public final class WatchRootModel {
         servers = []
         selectedScope = nil
         sessions = []
+        hasLoadedSessions = false
         registryRevision = Revision(0)
         lastErrorCode = nil
         nowPreview = nil
+        nowSpokenReply = nil
         focusedSessionKey = nil
     }
 
@@ -67,7 +110,8 @@ public final class WatchRootModel {
     public func markUnavailable() {
         state = .unavailable
         sessions = []
-        nowPreview = nil
+        hasLoadedSessions = false
+        clearNowReply()
         focusedSessionKey = nil
         activeRunBySession = [:]
     }
@@ -82,24 +126,27 @@ public final class WatchRootModel {
             state = .setupRequired
             servers = []
             sessions = []
-            nowPreview = nil
+            clearNowReply()
             focusedSessionKey = nil
             activeRunBySession = [:]
             return
         }
-        guard link.isReachable else {
-            // Companion is installed but momentarily unreachable. If we were
-            // ready (or signed out), present an honest disconnected state — not
-            // "Set up on iPhone" (the companion exists) and not a stale ready
-            // surface. If we never connected, stay on first-run copy.
-            if state == .ready || state == .signedOut {
-                markUnavailable()
-            } else if state != .unavailable {
-                state = .setupRequired
+        if link.phoneNeedsUnlockAfterReboot {
+            // Apple will not deliver WatchConnectivity until the phone has
+            // been unlocked once since it restarted. A locked phone after
+            // that unlock is a normal wake, handled below.
+            notePhoneQuiet(link)
+            if state != .ready && state != .signedOut {
+                state = .unavailable
             }
             return
         }
-        beginConnecting()
+        // isReachable is false while Hermex is suspended, including when the
+        // phone is locked. sendMessage still launches it in the background.
+        phoneStatusNote = nil
+        if state != .ready && state != .signedOut {
+            beginConnecting()
+        }
         let service = link.makeService()
         Task { await loadRegistry(using: service) }
     }
@@ -112,17 +159,31 @@ public final class WatchRootModel {
     }
 
     /// Called by the app when WCSession reports the phone became unreachable.
-    /// If we were ready, present an honest disconnected state so the wrist and
-    /// complications stop claiming a live connection; do not lie that setup is
-    /// missing — the companion is installed, just momentarily quiet.
+    /// A locked phone is still woken by sendMessage. Only a reboot that has
+    /// not been unlocked yet, or a watch with no iPhone app, leaves that screen.
     public func handleCompanionUnreachable() {
         guard let link, link.isCompanionAvailable else {
             if state != .setupRequired { state = .setupRequired }
             return
         }
-        if state == .ready || state == .signedOut {
-            markUnavailable()
+        guard link.phoneNeedsUnlockAfterReboot else {
+            // Reachability drops whenever Hermex is not in the foreground.
+            // The in-flight sendMessage is what wakes a locked phone, so
+            // this callback must not replace Connecting with "Set up on iPhone".
+            phoneStatusNote = nil
+            return
         }
+        notePhoneQuiet(link)
+        if state != .ready && state != .signedOut {
+            state = .unavailable
+        }
+    }
+
+    /// Apple's rule, not ours: after a reboot the iPhone must be unlocked
+    /// once. After that, a locked phone should not blank the watch.
+    private func notePhoneQuiet(_ link: any WatchCompanionLinking) {
+        _ = link
+        phoneStatusNote = "Unlock iPhone once after it restarts. It can stay locked after that."
     }
 
     /// Pull-to-refresh from the Sessions list (and foreground): reload the
@@ -147,12 +208,13 @@ public final class WatchRootModel {
 
     public func loadSessions() async {
         guard let link, let scope = selectedScope else { return }
+        defer { hasLoadedSessions = true }
         do {
             let snapshot = try await link.makeService().refreshSessions(
                 scope: scope,
                 collection: .current,
                 query: nil,
-                localLimit: 20
+                localLimit: 100
             )
             sessions = snapshot.value.items.filter { $0.key.scope == scope }
             dropRunsTheServerNoLongerReports()
@@ -167,12 +229,423 @@ public final class WatchRootModel {
             // surface and disable mutations.
             state = .signedOut
             sessions = []
-            nowPreview = nil
+            clearNowReply()
             focusedSessionKey = nil
             activeRunBySession = [:]
             lastErrorCode = "authRequired"
         } catch {
             lastErrorCode = "sessionsUnavailable"
+        }
+    }
+
+    public func loadComposerOptions() async -> WatchComposerOptions? {
+        if let fixtureGlances { return fixtureGlances.composer }
+        return await loadGlance { service, scope in
+            try await service.composerOptions(scope: scope).value
+        }
+    }
+
+    // MARK: Screenshot-fixture writes
+
+    /// The screenshot fixture has no phone to write through, so each wrist
+    /// action mutates the fixture in place. A silent `true` would have made the
+    /// fixture useless for checking that an action reaches the screen, so these
+    /// return the same success/failure the real path does and the list reloads
+    /// onto changed data.
+    private func applyFixtureTaskControl(jobID: String, action: TaskControl) -> Bool {
+        guard var fixture = fixtureGlances else { return false }
+        guard let index = fixture.tasks.firstIndex(where: { $0.key.jobID == jobID }) else { return true }
+        let task = fixture.tasks[index]
+        let running = action == .run
+        let enabled = action == .pause ? false : true
+        if let updated = try? WatchTaskSummary(
+            key: task.key,
+            name: task.name,
+            schedule: task.schedule,
+            enabled: enabled,
+            running: running,
+            lastResult: running ? nil : task.lastResult,
+            lastRunAt: task.lastRunAt,
+            nextRunAt: enabled ? task.nextRunAt : nil,
+            failureSummary: running ? nil : task.failureSummary
+        ) {
+            fixture.tasks[index] = updated
+            fixtureGlances = fixture
+        }
+        lastErrorCode = nil
+        return true
+    }
+
+    private func applyFixtureSkillToggle(name: String, enabled: Bool) -> Bool {
+        guard var fixture = fixtureGlances else { return false }
+        guard let index = fixture.skills.firstIndex(where: { $0.key.name == name }) else { return true }
+        let skill = fixture.skills[index]
+        if let updated = try? WatchSkillSummary(key: skill.key, summary: skill.summary, enabled: enabled) {
+            fixture.skills[index] = updated
+            fixtureGlances = fixture
+        }
+        lastErrorCode = nil
+        return true
+    }
+
+    private func applyFixtureKanbanMove(cardID: String, status: String) -> Bool {
+        guard var fixture = fixtureGlances else { return false }
+        guard let index = fixture.kanban.firstIndex(where: { $0.key.name == cardID }) else { return true }
+        let summary = fixture.kanban[index]
+        let card = WatchKanbanCard(id: cardID, wireSummary: summary.summary)
+        let moved = card.withStatus(status)
+        if let updated = try? WatchSkillSummary(
+            key: summary.key,
+            summary: moved.wireSummary,
+            enabled: summary.enabled
+        ) {
+            fixture.kanban[index] = updated
+            fixtureGlances = fixture
+        }
+        lastErrorCode = nil
+        return true
+    }
+
+    private func applyFixtureKanbanCreate(boardSlug: String, title: String, status: String) -> Bool {
+        guard var fixture = fixtureGlances else { return false }
+        _ = boardSlug
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let scope = fixture.kanban.first?.key.scope ?? selectedScope else { return true }
+        let id = "c\(fixture.kanban.count + 1)"
+        let created = WatchKanbanCard(id: id, title: trimmed, status: status, assignee: nil, priority: nil, body: nil)
+        guard let key = try? SkillKey(scope: scope, name: id),
+              let summary = try? WatchSkillSummary(key: key, summary: created.wireSummary, enabled: nil)
+        else { return true }
+        fixture.kanban.append(summary)
+        fixtureGlances = fixture
+        lastErrorCode = nil
+        return true
+    }
+
+    private func applyFixtureProfileSwitch(name: String) -> Bool {
+        guard var fixture = fixtureGlances, let composer = fixture.composer else { return false }
+        if let active = try? ProfileID(name),
+           let updated = try? WatchComposerOptions(
+            scope: composer.scope,
+            profiles: composer.profiles,
+            workspaces: composer.workspaces,
+            defaultProfileID: active,
+            defaultWorkspaceHandle: composer.defaultWorkspaceHandle
+           ) {
+            fixture.composer = updated
+            fixtureGlances = fixture
+        }
+        lastErrorCode = nil
+        return true
+    }
+
+    /// Every write the iPhone accepts is fenced on the registry revision it
+    /// issued (`PhoneCompanionBroker.matchesRevision`), while reads are fenced
+    /// only on the scope. A revision the watch cached at connect time therefore
+    /// goes stale on its own — the iPhone bumps it whenever its server list,
+    /// order (an active-server switch), or display name changes, and a relaunched
+    /// iPhone starts a fresh broker — and from then on every wrist action is
+    /// rejected while every list still loads. Re-reading the revision from the
+    /// phone immediately before a write closes that window. `registry()` is a
+    /// local lookup on the iPhone, so this costs one cheap round trip.
+    ///
+    /// A transport failure answers with an empty registry; that must not clobber
+    /// a good revision, so only a non-empty snapshot is adopted.
+    @discardableResult
+    private func refreshRevision(using service: any WatchCompanionServicing) async -> Revision {
+        let snapshot = await service.registry()
+        guard !snapshot.entries.isEmpty else { return registryRevision }
+        servers = snapshot.entries
+        registryRevision = snapshot.revision
+        return snapshot.revision
+    }
+
+    public func switchActiveProfile(name: String) async -> Bool {
+        if applyFixtureProfileSwitch(name: name) { return true }
+        guard canMutate, let link, let scope = selectedScope else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        do {
+            _ = try await service.switchActiveProfile(
+                scope: scope,
+                name: name,
+                expectedRevision: revision
+            )
+            lastErrorCode = nil
+            await loadSessions()
+            return true
+        } catch {
+            lastErrorCode = "profileSwitchFailed"
+            return false
+        }
+    }
+
+    public func controlTask(jobID: String, action: TaskControl) async -> Bool {
+        if applyFixtureTaskControl(jobID: jobID, action: action) { return true }
+        guard canMutate, let link, let scope = selectedScope else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        let created = Date()
+        do {
+            let key = try TaskKey(scope: scope, jobID: jobID)
+            let context = try CommandContext(
+                stableCommandID: CommandID(rawValue: UUID()),
+                scope: scope,
+                expectedRevision: revision,
+                createdAt: created,
+                expiresAt: created.addingTimeInterval(60)
+            )
+            let receipt = await service.controlTask(key: key, action: action, context: context)
+            guard receipt.receipt.phase == .acknowledged else {
+                lastErrorCode = "taskControlFailed"
+                return false
+            }
+            lastErrorCode = nil
+            return true
+        } catch {
+            lastErrorCode = "taskControlFailed"
+            return false
+        }
+    }
+
+    public func setSkillEnabled(name: String, enabled: Bool) async -> Bool {
+        if applyFixtureSkillToggle(name: name, enabled: enabled) { return true }
+        guard canMutate, let link, let scope = selectedScope else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        do {
+            try await service.setSkillEnabled(
+                scope: scope,
+                name: name,
+                enabled: enabled,
+                expectedRevision: revision
+            )
+            lastErrorCode = nil
+            return true
+        } catch {
+            lastErrorCode = "skillToggleFailed"
+            return false
+        }
+    }
+
+    public func moveKanbanCard(cardID: String, status: String) async -> Bool {
+        if applyFixtureKanbanMove(cardID: cardID, status: status) { return true }
+        guard canMutate, let link, let scope = selectedScope else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        do {
+            try await service.moveKanbanCard(
+                scope: scope,
+                cardID: cardID,
+                status: status,
+                expectedRevision: revision
+            )
+            lastErrorCode = nil
+            return true
+        } catch {
+            lastErrorCode = "kanbanMoveFailed"
+            return false
+        }
+    }
+
+    public func createKanbanCard(boardSlug: String, title: String, status: String) async -> Bool {
+        if applyFixtureKanbanCreate(boardSlug: boardSlug, title: title, status: status) { return true }
+        guard canMutate, let link, let scope = selectedScope else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        do {
+            try await service.createKanbanCard(
+                scope: scope,
+                boardSlug: boardSlug,
+                title: title,
+                status: status,
+                expectedRevision: revision
+            )
+            lastErrorCode = nil
+            return true
+        } catch {
+            lastErrorCode = "kanbanCreateFailed"
+            return false
+        }
+    }
+
+    /// A short count summary from the dispatcher. `nil` means it did not run.
+    public func dispatchKanban(boardSlug: String, dryRun: Bool) async -> String? {
+        if fixtureGlances != nil {
+            lastErrorCode = nil
+            return dryRun ? "Preview ready." : "Spawned 0\nPromoted 0"
+        }
+        guard canMutate, let link, let scope = selectedScope else { return nil }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
+        do {
+            let summary = try await service.dispatchKanban(
+                scope: scope,
+                boardSlug: boardSlug,
+                dryRun: dryRun,
+                expectedRevision: revision
+            )
+            lastErrorCode = nil
+            return summary
+        } catch {
+            lastErrorCode = "kanbanDispatchFailed"
+            return nil
+        }
+    }
+
+    public func loadTasks() async -> [WatchTaskSummary] {
+        if let fixtureGlances { return fixtureGlances.tasks }
+        return await loadGlance { service, scope in
+            try await service.tasks(scope: scope, localLimit: 32).value.items
+        } ?? []
+    }
+
+    public func loadSkills() async -> [WatchSkillSummary] {
+        if let fixtureGlances { return fixtureGlances.skills }
+        return await loadGlance { service, scope in
+            try await service.skills(scope: scope, query: nil, localLimit: 64).value.items
+        } ?? []
+    }
+
+    public func loadKanbanCards() async -> [WatchKanbanCard] {
+        let summaries: [WatchSkillSummary]
+        if let fixtureGlances {
+            summaries = fixtureGlances.kanban
+        } else {
+            summaries = await loadGlance { service, scope in
+                try await service.skills(scope: scope, query: WatchGlanceQuery.kanban, localLimit: 64).value.items
+            } ?? []
+        }
+        return summaries.compactMap { summary in
+            guard summary.key.name != WatchKanbanBoardChrome.cardID else { return nil }
+            return WatchKanbanCard(id: summary.key.name, wireSummary: summary.summary)
+        }
+    }
+
+    /// The board the iPhone is browsing, including a board whose columns are all
+    /// empty. `nil` means the read failed; an empty card list is a real board.
+    public func loadKanbanBoard(slug: String?, includeArchived: Bool, onlyMine: Bool) async -> WatchKanbanBoardLoad? {
+        let summaries: [WatchSkillSummary]
+        if let fixtureGlances {
+            summaries = fixtureGlances.kanban
+        } else {
+            let query = WatchGlanceQuery.kanban(slug: slug, includeArchived: includeArchived, onlyMine: onlyMine)
+            guard let loaded = await loadGlance({ service, scope in
+                try await service.skills(scope: scope, query: query, localLimit: 64).value.items
+            }) else { return nil }
+            summaries = loaded
+        }
+        return Self.kanbanBoard(from: summaries, includeArchived: includeArchived)
+    }
+
+    private static func kanbanBoard(from summaries: [WatchSkillSummary], includeArchived: Bool) -> WatchKanbanBoardLoad {
+        var chrome: WatchKanbanBoardChrome?
+        var cards: [WatchKanbanCard] = []
+        for summary in summaries {
+            if summary.key.name == WatchKanbanBoardChrome.cardID,
+               let parsed = WatchKanbanBoardChrome(wireSummary: summary.summary) {
+                chrome = parsed
+                continue
+            }
+            cards.append(WatchKanbanCard(id: summary.key.name, wireSummary: summary.summary))
+        }
+        var resolved = chrome ?? WatchKanbanBoardChrome(
+            name: "Kanban",
+            slug: "default",
+            columns: WatchKanbanStatus.boardOrder,
+            boards: [WatchKanbanBoardChrome.Choice(slug: "default", name: "Kanban")]
+        )
+        for card in cards where !resolved.columns.contains(card.status) {
+            resolved.columns.append(card.status)
+        }
+        if includeArchived, !resolved.columns.contains("archived") {
+            resolved.columns.append("archived")
+        }
+        if !includeArchived {
+            resolved.columns.removeAll { $0 == "archived" }
+            cards.removeAll { $0.status == "archived" }
+        }
+        return WatchKanbanBoardLoad(chrome: resolved, cards: cards)
+    }
+
+    /// Recent runs, newest first. `nil` means the load failed, so the detail
+    /// screen can show its own Try again instead of an empty history.
+    public func loadTaskRuns(jobID: String, limit: Int = 5) async -> [WatchTaskRun]? {
+        if let fixtureGlances { return fixtureGlances.taskRuns[jobID] ?? [] }
+        guard let link, let scope = selectedScope else { return nil }
+        do {
+            let key = try TaskKey(scope: scope, jobID: jobID)
+            let page = try PageRequest(continuation: nil, limit: min(max(limit, 1), 20))
+            return try await link.makeService().taskRuns(key: key, page: page).value.items
+        } catch {
+            return nil
+        }
+    }
+
+    /// One run's wrist-sized output. Outer `nil` is a failed load; an inner
+    /// `nil` is a run that produced no output.
+    public func loadTaskRunOutput(jobID: String, runID: String) async -> WatchTaskRunDetail? {
+        if let fixtureGlances {
+            guard let run = fixtureGlances.taskRuns[jobID]?.first(where: { $0.runID == runID }) else { return nil }
+            return try? WatchTaskRunDetail(run: run, output: fixtureGlances.taskOutputs[runID], outputTruncated: false)
+        }
+        guard let link, let scope = selectedScope else { return nil }
+        do {
+            let key = try TaskKey(scope: scope, jobID: jobID)
+            return try await link.makeService().taskRunDetail(key: key, runID: runID).value
+        } catch {
+            return nil
+        }
+    }
+
+    public func loadMemory() async -> WatchMemoryDocument? {
+        if let fixtureGlances { return fixtureGlances.memory }
+        return await loadGlance { service, scope in
+            try await service.memoryDocument(scope: scope).value
+        }
+    }
+
+    public func loadUsage(days: Int = 30) async -> WatchInsightsAggregate? {
+        if let fixtureGlances, let usage = fixtureGlances.usage {
+            let scale = Double(days) / Double(usage.days.value)
+            func scaled(_ value: Int) -> Int { Int((Double(value) * scale).rounded()) }
+            return try? WatchInsightsAggregate(
+                days: InsightsDays(days),
+                totalSessions: scaled(usage.totalSessions),
+                totalMessages: scaled(usage.totalMessages),
+                totalInputTokens: scaled(usage.totalInputTokens),
+                totalOutputTokens: scaled(usage.totalOutputTokens),
+                totalTokens: scaled(usage.totalTokens),
+                totalCost: usage.totalCost * Decimal(scale),
+                models: usage.models,
+                dailyTokens: BoundedCollection(items: Array(usage.dailyTokens.items.suffix(days)), isTruncated: false),
+                activityByDay: usage.activityByDay,
+                activityByHour: usage.activityByHour,
+                modelUsage: usage.modelUsage
+            )
+        }
+        if fixtureGlances != nil { return nil }
+        return await loadGlance { service, scope in
+            let window = try InsightsDays(min(max(days, 1), 365))
+            return try await service.insightsAggregate(scope: scope, days: window).value
+        }
+    }
+
+    private func loadGlance<T: Sendable>(_ work: (any WatchCompanionServicing, ServerScope) async throws -> T) async -> T? {
+        guard let link, let scope = selectedScope else { return nil }
+        do {
+            let value = try await work(link.makeService(), scope)
+            lastErrorCode = nil
+            return value
+        } catch is CancellationError {
+            return nil
+        } catch WatchCompanionError.backend(.authRequired) {
+            state = .signedOut
+            lastErrorCode = "authRequired"
+            return nil
+        } catch {
+            lastErrorCode = "glanceUnavailable"
+            return nil
         }
     }
 
@@ -187,6 +660,9 @@ public final class WatchRootModel {
                 before: nil,
                 limit: 20
             )
+            if lastErrorCode == "transcriptUnavailable" {
+                lastErrorCode = nil
+            }
             return snapshot.value.blocks
         } catch {
             lastErrorCode = "transcriptUnavailable"
@@ -208,10 +684,11 @@ public final class WatchRootModel {
 
     public func sendPhoto(image: Data, filename: String, caption: String, to key: SessionKey) async -> RunKey? {
         guard canMutate, let link, let scope = selectedScope else { return nil }
+        let revision = await refreshRevision(using: link.makeService())
         do {
             let request = try WatchPhotoSendRequest(
                 scope: scope,
-                expectedRevision: registryRevision,
+                expectedRevision: revision,
                 session: key,
                 filename: filename,
                 image: image,
@@ -251,10 +728,11 @@ public final class WatchRootModel {
 
     public func sendVoiceNote(audio: Data, filename: String, to key: SessionKey) async -> RunKey? {
         guard canMutate, let link, let scope = selectedScope else { return nil }
+        let revision = await refreshRevision(using: link.makeService())
         do {
             let request = try WatchVoiceNoteRequest(
                 scope: scope,
-                expectedRevision: registryRevision,
+                expectedRevision: revision,
                 session: key,
                 filename: filename,
                 audio: audio
@@ -280,16 +758,18 @@ public final class WatchRootModel {
 
     public func send(text: String, to key: SessionKey) async -> RunKey? {
         guard canMutate, let link else { return nil }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
         let created = Date()
         do {
             let context = try CommandContext(
                 stableCommandID: CommandID(rawValue: UUID()),
                 scope: key.scope,
-                expectedRevision: registryRevision,
+                expectedRevision: revision,
                 createdAt: created,
                 expiresAt: created.addingTimeInterval(60)
             )
-            let receipt = await link.makeService().send(text: text, to: key, context: context)
+            let receipt = await service.send(text: text, to: key, context: context)
             if let run = receipt.value {
                 lastErrorCode = nil
                 // Reload first: the optimistic run marker has to outlive the
@@ -316,16 +796,18 @@ public final class WatchRootModel {
         guard let link else {
             return insertLocalSession(scope: scope, title: "New session")
         }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
         let created = Date()
         do {
             let context = try CommandContext(
                 stableCommandID: CommandID(rawValue: UUID()),
                 scope: scope,
-                expectedRevision: registryRevision,
+                expectedRevision: revision,
                 createdAt: created,
                 expiresAt: created.addingTimeInterval(60)
             )
-            let receipt = await link.makeService().createSession(
+            let receipt = await service.createSession(
                 scope: scope,
                 profileID: nil,
                 workspaceHandle: nil,
@@ -350,16 +832,18 @@ public final class WatchRootModel {
 
     public func stop(_ session: WatchSessionSummary) async -> Bool {
         guard canMutate, let link, let run = activeRun(for: session) else { return false }
+        let service = link.makeService()
+        let revision = await refreshRevision(using: service)
         let created = Date()
         do {
             let context = try CommandContext(
                 stableCommandID: CommandID(rawValue: UUID()),
                 scope: run.session.scope,
-                expectedRevision: registryRevision,
+                expectedRevision: revision,
                 createdAt: created,
                 expiresAt: created.addingTimeInterval(60)
             )
-            let receipt = await link.makeService().stop(run: run, context: context)
+            let receipt = await service.stop(run: run, context: context)
             if receipt.value != nil {
                 activeRunBySession[session.key] = nil
                 lastErrorCode = nil
@@ -419,11 +903,59 @@ public final class WatchRootModel {
         state == .ready
     }
 
+    /// Failures that belong to a reply control — Message, voice note, photo,
+    /// Stop run. The control that failed shows these itself and drops them the
+    /// moment the user tries again, so echoing them as a banner over Now left
+    /// "Couldn't send. Try again." sitting above a composer that works.
+    private static let replyControlErrorCodes: Set<String> = [
+        "sendFailed",
+        "sendRejected",
+        "tooLarge",
+        "stopFailed",
+        "stopRejected",
+    ]
+
+    /// A glance, a transcript, a reply control, or a one-tap wrist action owns
+    /// its own failure. Now and Sessions must not repeat it: opening Tasks used
+    /// to leave "Couldn't load this list." on the session screens.
+    private static let screenLocalErrorCodes: Set<String> = [
+        "transcriptUnavailable",
+        "glanceUnavailable",
+        "profileSwitchFailed",
+        "taskControlFailed",
+        "skillToggleFailed",
+        "kanbanMoveFailed",
+        "kanbanCreateFailed",
+        "kanbanDispatchFailed",
+    ]
+
+    /// Session lists and Now already have their rows. A transcript miss belongs
+    /// on the open chat, and a reply-control failure belongs next to its own
+    /// control, not as a red banner above every session.
+    public var sidebarErrorCopy: String? {
+        guard let code = lastErrorCode else { return nil }
+        guard !Self.screenLocalErrorCodes.contains(code), !Self.replyControlErrorCodes.contains(code) else { return nil }
+        return errorCopy
+    }
+
+    /// Drops a reply-control failure because the user started another attempt
+    /// (opened the keyboard, started recording, picked a photo, pressed Stop).
+    /// Leaves sessions-load and auth failures alone — those are Now's to show.
+    public func clearReplyControlError() {
+        guard let code = lastErrorCode, Self.replyControlErrorCodes.contains(code) else { return }
+        lastErrorCode = nil
+    }
+
     /// A short, user-facing explanation of the last failure so create / send /
     /// stop / transcript errors are not haptic-only. `nil` when there is nothing
     /// to surface.
     public var errorCopy: String? {
-        guard let code = lastErrorCode else { return nil }
+        lastErrorCode.map(Self.errorCopy(for:))
+    }
+
+    /// Copy for one failure code, so a control that owns its own error renders
+    /// the same sentence the model would have shown.
+    public static func errorCopy(for code: String) -> String {
         switch code {
         case "authRequired":
             return "Sign in on iPhone to continue."
@@ -445,6 +977,20 @@ public final class WatchRootModel {
             return "Couldn’t stop the run."
         case "stopRejected":
             return "Hermex didn’t stop that run."
+        case "profileSwitchFailed":
+            return "Couldn’t switch profile."
+        case "taskControlFailed":
+            return "Couldn’t update that task."
+        case "skillToggleFailed":
+            return "Couldn’t update that skill."
+        case "kanbanMoveFailed":
+            return "Couldn’t move that card."
+        case "kanbanCreateFailed":
+            return "Couldn’t create that card."
+        case "kanbanDispatchFailed":
+            return "Couldn’t run the dispatcher."
+        case "glanceUnavailable":
+            return "Couldn’t load this list."
         default:
             return "Something went wrong. Try again."
         }
@@ -455,7 +1001,9 @@ public final class WatchRootModel {
     /// `DEBUG` so the demo strings ("Stand-up notes", etc.) never ship in the
     /// release module. UI tests opt in via the `HERMEX_WATCH_SCREENSHOT_FIXTURE`
     /// launch argument, which the app reads under its own `#if DEBUG` guard.
-    public func applyScreenshotFixture() {
+    /// `replyError` seeds a reply-control failure code so a screenshot can show
+    /// that a failed send no longer paints a banner over Now.
+    public func applyScreenshotFixture(replyError: String? = nil) {
         let scope = ServerScope(
             epoch: InstallationEpoch(rawValue: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!),
             server: ServerID(rawValue: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!),
@@ -498,13 +1046,152 @@ public final class WatchRootModel {
             servers: [RegistryEntry(scope: scope, displayName: try! RedactedDisplayName("Studio"))],
             sessions: [running, pinned, attention]
         )
-        nowPreview = "Drafted the stand-up notes and queued the follow-ups."
+        let now = Date()
+        let digestRuns = [
+            try! WatchTaskRun(task: TaskKey(scope: scope, jobID: "digest"), runID: "digest-today.md", startedAt: now.addingTimeInterval(-3_700), finishedAt: now.addingTimeInterval(-3_600), status: "finished", output: nil, isTruncated: false),
+            try! WatchTaskRun(task: TaskKey(scope: scope, jobID: "digest"), runID: "digest-yesterday.md", startedAt: now.addingTimeInterval(-90_100), finishedAt: now.addingTimeInterval(-90_000), status: "finished", output: nil, isTruncated: false),
+        ]
+        func card(_ id: String, _ title: String, _ status: String, assignee: String? = nil, priority: Int? = nil, body: String? = nil) -> WatchSkillSummary {
+            let card = WatchKanbanCard(id: id, title: title, status: status, assignee: assignee, priority: priority, body: body)
+            return try! WatchSkillSummary(key: SkillKey(scope: scope, name: id), summary: card.wireSummary, enabled: nil)
+        }
+        fixtureGlances = FixtureGlances(
+            tasks: [
+                try! WatchTaskSummary(key: TaskKey(scope: scope, jobID: "digest"), name: "Morning digest", schedule: "Every day at 8:00 AM", enabled: true, running: false, lastResult: "ok", lastRunAt: now.addingTimeInterval(-3_600), nextRunAt: now.addingTimeInterval(20 * 3_600)),
+                try! WatchTaskSummary(key: TaskKey(scope: scope, jobID: "backup"), name: "Repo backup", schedule: "Every 6 hours", enabled: true, running: true, lastResult: nil, lastRunAt: now.addingTimeInterval(-6 * 3_600), nextRunAt: now.addingTimeInterval(6 * 3_600)),
+                try! WatchTaskSummary(key: TaskKey(scope: scope, jobID: "prices"), name: "Price watch", schedule: "Hourly", enabled: false, running: false, lastResult: "error", lastRunAt: now.addingTimeInterval(-2 * 86_400), nextRunAt: nil, failureSummary: "Timed out after 300s fetching prices"),
+            ],
+            kanban: [
+                card("c1", "Ship watch reply controls", "running", assignee: "default", priority: 2, body: "Stop, voice note and **photo** on Now. Verify on a 41mm screen."),
+                card("c2", "Audit session sync", "ready", assignee: "research"),
+                card("c3", "Write release notes", "todo", priority: 1),
+                card("c4", "Fix desktop session ids", "done"),
+            ],
+            skills: [
+                try! WatchSkillSummary(key: SkillKey(scope: scope, name: "web-search"), summary: "Search the web and cite sources.", enabled: true),
+                try! WatchSkillSummary(key: SkillKey(scope: scope, name: "calendar"), summary: "Read and draft calendar events.", enabled: false),
+            ],
+            usage: try! WatchInsightsAggregate(
+                days: InsightsDays(30),
+                totalSessions: 142,
+                totalMessages: 3_918,
+                totalInputTokens: 8_420_000,
+                totalOutputTokens: 1_310_000,
+                totalTokens: 9_730_000,
+                totalCost: Decimal(string: "48.72")!,
+                models: BoundedCollection(items: ["gpt-5.6-sol", "claude-opus-5.5"], isTruncated: false),
+                dailyTokens: BoundedCollection(
+                    items: (0..<30).map { day in 180_000 + ((day * 7_919) % 13) * 41_000 },
+                    isTruncated: false
+                ),
+                activityByDay: BoundedCollection(items: [], isTruncated: false),
+                activityByHour: BoundedCollection(items: [], isTruncated: false),
+                modelUsage: BoundedCollection(items: [
+                    WatchModelUsage(name: "gpt-5.6-sol", totalTokens: 6_100_000, cost: Decimal(string: "31.40")!, sessions: 96),
+                    WatchModelUsage(name: "claude-opus-5.5", totalTokens: 3_630_000, cost: Decimal(string: "17.32")!, sessions: 46),
+                ], isTruncated: false)
+            ),
+            // Same layout a real USER.md / MEMORY.md has: one fact per entry,
+            // `§` between entries, bold labels, and an email the line breaker
+            // used to hyphenate.
+            memory: try! WatchMemoryDocument(sections: [
+                WatchMemorySection(
+                    key: MemoryKey(scope: scope, remoteID: "memory"),
+                    section: "memory",
+                    redactedContent: WatchMemoryProjection.wireContent(WatchMemoryProjection.wristEntries(from: """
+                    Prefers short replies on the watch.
+                    §
+                    Ships builds from the **Mac mini** over Tailscale.
+                    §
+                    Voice: ElevenLabs v4 is the current external TTS for long PDFs.
+                    """).entries),
+                    isTruncated: false
+                ),
+                WatchMemorySection(
+                    key: MemoryKey(scope: scope, remoteID: "user"),
+                    section: "user",
+                    redactedContent: WatchMemoryProjection.wireContent(WatchMemoryProjection.wristEntries(from: """
+                    **Name:** Aaryan Guglani (goes by Aaryan)
+                    §
+                    **Email:** guglaniaaryan@gmail.com
+                    §
+                    **Timezone:** GMT+5:30 (Asia/Calcutta)
+                    §
+                    **Stack:**
+                    - SwiftUI and watchOS
+                    - Self-hosted Hermes on a Mac mini
+                    """).entries),
+                    isTruncated: false
+                ),
+            ]),
+            composer: try! WatchComposerOptions(
+                scope: scope,
+                profiles: [
+                    WatchComposerOptions.ProfileChoice(id: ProfileID("default"), label: "Default\ngpt-5.6-sol"),
+                    WatchComposerOptions.ProfileChoice(id: ProfileID("research"), label: "Research\nclaude-opus-5.5"),
+                ],
+                workspaces: [
+                    WatchComposerOptions.WorkspaceChoice(handle: WorkspaceHandle("hermex"), label: "hermex"),
+                    WatchComposerOptions.WorkspaceChoice(handle: WorkspaceHandle("dotfiles"), label: "dotfiles"),
+                ],
+                defaultProfileID: ProfileID("default"),
+                defaultWorkspaceHandle: nil
+            ),
+            taskRuns: ["digest": digestRuns],
+            taskOutputs: [
+                "digest-today.md": WatchTranscriptProjection.wristMarkdown("""
+                ### Morning digest
+                - 3 PRs waiting on review
+                - Build **42** passed on TestFlight
+                - Calendar: stand-up at 10:00
+                """),
+            ]
+        )
+        // Mirrors the real reply that printed raw Markdown on the watch: a bold
+        // bare tailnet URL, an ATX heading, an untagged fence and a list. Run
+        // through the phone projection so the fixture exercises the same
+        // normalization the broker does.
+        let richReply = WatchTranscriptProjection.blocks(
+            for: WatchPhoneMessageHint(
+                id: "2",
+                role: .assistant,
+                text: """
+                I reached the server. Open **https://aaryans-mac-mini.taild36793.ts.net/** on your \
+                iPhone while Tailscale is connected.
+
+                ### Verified configuration
+
+                ```text
+                https://aaryans-mac-mini.taild36793.ts.net (tailnet only)
+                ```
+
+                - `brew services` is running
+                - Tailscale is up on *both* machines
+                - Full write-up: [the setup notes](https://get-hermes.ai/api-docs/setup)
+
+                1. Open the link above
+                2. Sign in once
+
+                > Keep the tunnel off until this works.
+                """
+            )
+        )
         fixtureTranscriptBySessionID = [
             "stand-up": [
                 .text(id: "1", role: .user, text: "Summarize stand-up."),
-                .text(id: "2", role: .assistant, text: "Drafted the stand-up notes and queued the follow-ups."),
-            ],
+            ] + richReply.compactMap { block in
+                switch block.kind {
+                case .text(let role, let text):
+                    return .text(id: block.id, role: role, text: text)
+                case .code(let language, let text, let isTruncated):
+                    return .code(id: block.id, language: language, text: text, isTruncated: isTruncated)
+                default:
+                    return nil
+                }
+            },
         ]
+        applyNowReply(from: fixtureTranscriptBySessionID["stand-up"] ?? [])
+        lastErrorCode = replyError
     }
     #endif
 
@@ -538,9 +1225,7 @@ public final class WatchRootModel {
         ) else { return nil }
         sessions.insert(summary, at: 0)
         focusedSessionKey = resolvedKey
-        nowPreview = WatchTranscriptPreview.lastAssistantText(
-            in: fixtureTranscriptBySessionID[resolvedKey.sessionID] ?? []
-        )
+        applyNowReply(from: fixtureTranscriptBySessionID[resolvedKey.sessionID] ?? [])
         lastErrorCode = nil
         return resolvedKey
     }
@@ -552,6 +1237,7 @@ public final class WatchRootModel {
     ) {
         self.servers = servers
         self.sessions = sessions
+        hasLoadedSessions = true
         selectedScope = servers.first?.scope
         registryRevision = revision
         state = .ready
@@ -559,11 +1245,24 @@ public final class WatchRootModel {
 
     private func refreshNowPreview() async {
         guard let session = nowSession else {
-            nowPreview = nil
+            clearNowReply()
             return
         }
         let blocks = await transcript(for: session)
+        // The Now session can change while its transcript loads; a late reply
+        // must not label the card it no longer belongs to.
+        guard nowSession?.key == session.key else { return }
+        applyNowReply(from: blocks)
+    }
+
+    private func applyNowReply(from blocks: [WatchTranscriptBlock]) {
         nowPreview = WatchTranscriptPreview.lastAssistantText(in: blocks)
+        nowSpokenReply = WatchTranscriptPreview.lastAssistantReply(in: blocks)
+    }
+
+    private func clearNowReply() {
+        nowPreview = nil
+        nowSpokenReply = nil
     }
 
     private func loadRegistry(using service: any WatchCompanionServicing) async {
@@ -571,8 +1270,12 @@ public final class WatchRootModel {
         servers = snapshot.entries
         registryRevision = snapshot.revision
         if snapshot.entries.isEmpty {
-            state = .setupRequired
-            adopt(nil)
+            // A failed wake returns the same empty snapshot as a phone with
+            // no servers. Keep a board we already showed.
+            if servers.isEmpty {
+                state = .setupRequired
+                adopt(nil)
+            }
             return
         }
         // The iPhone lists its active server first. A selection that is gone from
@@ -585,13 +1288,15 @@ public final class WatchRootModel {
             adopt(preferred)
         }
         state = .ready
+        phoneStatusNote = nil
         await loadSessions()
     }
 
     private func adopt(_ scope: ServerScope?) {
         selectedScope = scope
         sessions = []
-        nowPreview = nil
+        hasLoadedSessions = false
+        clearNowReply()
         focusedSessionKey = nil
         activeRunBySession = [:]
     }

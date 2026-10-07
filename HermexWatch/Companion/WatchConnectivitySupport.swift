@@ -98,6 +98,10 @@ struct WatchConnectivitySessionLink: WatchCompanionLinking {
         WCSession.isSupported() && WCSession.default.isReachable
     }
 
+    var phoneNeedsUnlockAfterReboot: Bool {
+        WCSession.isSupported() && WCSession.default.iOSDeviceNeedsUnlockAfterRebootForReachability
+    }
+
     func makeService() -> any WatchCompanionServicing {
         WatchWireClient(transport: WCSessionTransport())
     }
@@ -111,11 +115,30 @@ struct WatchConnectivitySessionLink: WatchCompanionLinking {
     }
 }
 
+/// One `sendMessage` at a time. A second call while the first is still
+/// waiting is dropped by WatchConnectivity and never answers.
+private actor WatchMessageSerializer {
+    static let shared = WatchMessageSerializer()
+
+    func run(_ body: @Sendable () async throws -> WatchWireReply) async throws -> WatchWireReply {
+        try await body()
+    }
+}
+
 struct WCSessionTransport: WatchWireTransporting {
     func send(_ message: WatchWireMessage) async throws -> WatchWireReply {
-        guard WCSession.isSupported(), WCSession.default.isReachable else {
+        guard WCSession.isSupported() else {
             throw WatchCompanionError.phoneUnavailable
         }
+        return try await WatchMessageSerializer.shared.run {
+            try await self.sendSerialized(message)
+        }
+    }
+
+    private func sendSerialized(_ message: WatchWireMessage) async throws -> WatchWireReply {
+        // Do not refuse just because isReachable is false. sendMessage launches
+        // the iPhone app when it is not in the foreground, including while the
+        // phone is locked, as long as it was unlocked once after boot.
         if case .transcribe(let request) = message, WatchVoiceNoteWire.requiresFileTransfer(request) {
             return try await sendTranscribeViaFile(request)
         }
@@ -145,26 +168,75 @@ struct WCSessionTransport: WatchWireTransporting {
         return try await sendInline(.sendPhotoFile(try request.fileRef(transferID: transferID)))
     }
 
+    /// The registry read gates "Connecting". WatchConnectivity can sit on a
+    /// message to a phone that just went quiet without calling either handler,
+    /// so this one read gives up and lets the model show first-run copy.
+    static let registryReplyTimeout: TimeInterval = 10
+    /// A reachable phone that accepts a read and never replies used to leave
+    /// Tasks and Kanban on a spinner. Voice notes and photos still wait: they
+    /// block on transcription and upload.
+    static let reachableReplyTimeout: TimeInterval = 40
+
+    private func replyTimeout(for message: WatchWireMessage) -> TimeInterval? {
+        switch message {
+        case .transcribe, .transcribeFile, .sendPhoto, .sendPhotoFile:
+            return nil
+        case .registry:
+            return Self.registryReplyTimeout
+        default:
+            return WCSession.default.isReachable ? Self.reachableReplyTimeout : Self.registryReplyTimeout
+        }
+    }
+
     private func sendInline(_ message: WatchWireMessage) async throws -> WatchWireReply {
         let payload = try JSONEncoder().encode(message)
+        // A quiet phone used to sit forever on sendMessage. Give a locked phone
+        // time to wake Hermex, then give up so the wrist can keep its last data.
+        // The timeout is armed before sendMessage, and sendMessage itself runs
+        // off the main thread: a call that blocks would otherwise pin the watch
+        // UI on the spinner with the timeout still unscheduled.
+        let timeout = replyTimeout(for: message)
         return try await withCheckedThrowingContinuation { continuation in
-            WCSession.default.sendMessage(
-                ["data": payload],
-                replyHandler: { reply in
-                    guard let data = reply["data"] as? Data else {
-                        continuation.resume(throwing: WatchCompanionError.backend(.invalidResponse))
-                        return
-                    }
-                    do {
-                        continuation.resume(returning: try JSONDecoder().decode(WatchWireReply.self, from: data))
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                },
-                errorHandler: { error in
-                    continuation.resume(throwing: error)
+            let reply = ReplyOnce(continuation)
+            if let timeout {
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    reply.resume(.failure(WatchCompanionError.phoneUnavailable))
                 }
-            )
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                WCSession.default.sendMessage(
+                    ["data": payload],
+                    replyHandler: { message in
+                        guard let data = message["data"] as? Data else {
+                            reply.resume(.failure(WatchCompanionError.backend(.invalidResponse)))
+                            return
+                        }
+                        reply.resume(Result { try JSONDecoder().decode(WatchWireReply.self, from: data) })
+                    },
+                    errorHandler: { error in
+                        reply.resume(.failure(error))
+                    }
+                )
+            }
         }
+    }
+}
+
+/// Resumes a continuation at most once, whichever of reply, error or timeout
+/// arrives first.
+private final class ReplyOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<WatchWireReply, Error>?
+
+    init(_ continuation: CheckedContinuation<WatchWireReply, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ result: Result<WatchWireReply, Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
     }
 }

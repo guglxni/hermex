@@ -11,8 +11,10 @@ struct HermexWatchApp: App {
             WatchRootView(model: model, screenshotPage: Self.screenshotPage)
                 .onAppear {
                     #if DEBUG
-                    if ProcessInfo.processInfo.arguments.contains("HERMEX_WATCH_SCREENSHOT_FIXTURE") {
-                        model.applyScreenshotFixture()
+                    if Self.usesScreenshotFixture {
+                        model.applyScreenshotFixture(
+                            replyError: Self.screenshotPage == .nowReplyError ? "sendFailed" : nil
+                        )
                         WatchWidgetSnapshotPublisher.publish(model)
                         return
                     }
@@ -28,6 +30,9 @@ struct HermexWatchApp: App {
                     // backgrounded is followed, and a quiet phone is surfaced
                     // honestly instead of showing a stale ready surface.
                     guard phase == .active else { return }
+                    #if DEBUG
+                    if Self.usesScreenshotFixture { return }
+                    #endif
                     model.refreshConnection()
                     WatchWidgetSnapshotPublisher.publish(model)
                 }
@@ -50,6 +55,12 @@ struct HermexWatchApp: App {
             }
         }
     }
+
+    #if DEBUG
+    private static var usesScreenshotFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("HERMEX_WATCH_SCREENSHOT_FIXTURE")
+    }
+    #endif
 
     private static var screenshotPage: WatchScreenshotPage {
         #if DEBUG

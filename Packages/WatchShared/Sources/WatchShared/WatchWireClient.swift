@@ -101,7 +101,94 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
     }
 
     public func composerOptions(scope: ServerScope) async throws -> ScopedSnapshot<WatchComposerOptions> {
-        throw WatchCompanionError.unsupported(.composerOptions)
+        try await read(scope: scope, operation: .composerOptions(scope: scope))
+    }
+
+    public func switchActiveProfile(scope: ServerScope, name: String, expectedRevision: Revision) async throws -> String {
+        let request = try WatchProfileSwitchRequest(
+            scope: scope,
+            expectedRevision: expectedRevision,
+            name: name
+        )
+        let reply = try await transport.send(.switchProfile(request))
+        if case .transcript(let active) = reply {
+            let trimmed = active.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        throw failureAsError(reply)
+    }
+
+    public func setSkillEnabled(scope: ServerScope, name: String, enabled: Bool, expectedRevision: Revision) async throws {
+        let request = try WatchSkillToggleRequest(
+            scope: scope,
+            expectedRevision: expectedRevision,
+            name: name,
+            enabled: enabled
+        )
+        let reply = try await transport.send(.setSkillEnabled(request))
+        if case .failure = reply { throw WatchCompanionError.backend(.invalidResponse) }
+    }
+
+    public func createKanbanCard(
+        scope: ServerScope,
+        boardSlug: String,
+        title: String,
+        status: String,
+        expectedRevision: Revision
+    ) async throws {
+        let request = try WatchKanbanCreateRequest(
+            scope: scope,
+            expectedRevision: expectedRevision,
+            boardSlug: boardSlug,
+            title: title,
+            status: status
+        )
+        let reply = try await transport.send(.createKanbanCard(request))
+        if case .failure = reply { throw failureAsError(reply) }
+    }
+
+    public func dispatchKanban(
+        scope: ServerScope,
+        boardSlug: String,
+        dryRun: Bool,
+        expectedRevision: Revision
+    ) async throws -> String {
+        let request = try WatchKanbanDispatchRequest(
+            scope: scope,
+            expectedRevision: expectedRevision,
+            boardSlug: boardSlug,
+            dryRun: dryRun
+        )
+        let reply = try await transport.send(.dispatchKanban(request))
+        if case .transcript(let summary) = reply { return summary }
+        throw failureAsError(reply)
+    }
+
+    public func moveKanbanCard(scope: ServerScope, cardID: String, status: String, expectedRevision: Revision) async throws {
+        let request = try WatchKanbanMoveRequest(
+            scope: scope,
+            expectedRevision: expectedRevision,
+            cardID: cardID,
+            status: status
+        )
+        let reply = try await transport.send(.moveKanbanCard(request))
+        if case .failure = reply { throw WatchCompanionError.backend(.invalidResponse) }
+    }
+
+    public func tasks(scope: ServerScope, localLimit: Int) async throws -> ScopedSnapshot<BoundedCollection<WatchTaskSummary>> {
+        try await read(scope: scope, operation: .tasks(scope: scope, localLimit: localLimit))
+    }
+
+    public func skills(scope: ServerScope, query: String?, localLimit: Int) async throws -> ScopedSnapshot<BoundedCollection<WatchSkillSummary>> {
+        try await read(scope: scope, operation: .skills(scope: scope, query: query, localLimit: localLimit))
+    }
+
+    public func memoryDocument(scope: ServerScope) async throws -> ScopedSnapshot<WatchMemoryDocument> {
+        try await read(scope: scope, operation: .memoryDocument(scope: scope))
+    }
+
+    public func insightsAggregate(scope: ServerScope, days: InsightsDays) async throws -> ScopedSnapshot<WatchInsightsAggregate> {
+        try await read(scope: scope, operation: .insightsAggregate(scope: scope, days: days))
     }
     public func pendingApprovalHead(session: SessionKey) async throws -> ScopedSnapshot<WatchAttentionHead<WatchApproval>> {
         throw WatchCompanionError.unsupported(.pendingApprovalHead)
@@ -109,32 +196,20 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
     public func pendingClarificationHead(session: SessionKey) async throws -> ScopedSnapshot<WatchAttentionHead<WatchClarification>> {
         throw WatchCompanionError.unsupported(.pendingClarificationHead)
     }
-    public func tasks(scope: ServerScope, localLimit: Int) async throws -> ScopedSnapshot<BoundedCollection<WatchTaskSummary>> {
-        throw WatchCompanionError.unsupported(.tasks)
-    }
     public func taskRuns(key: TaskKey, page: PageRequest) async throws -> ScopedSnapshot<BoundedPage<WatchTaskRun>> {
-        throw WatchCompanionError.unsupported(.taskRuns)
+        try await read(scope: key.scope, operation: .taskRuns(task: key, page: page))
     }
     public func taskRunDetail(key: TaskKey, runID: String) async throws -> ScopedSnapshot<WatchTaskRunDetail> {
-        throw WatchCompanionError.unsupported(.taskRunDetail)
+        try await read(scope: key.scope, operation: .taskRunDetail(task: key, runID: runID))
     }
     public func controlTask(key: TaskKey, action: TaskControl, context: CommandContext) async -> CommandReceipt<EmptyValue> {
-        currentPinRejection(context: context, kind: .controlTask)
-    }
-    public func skills(scope: ServerScope, query: String?, localLimit: Int) async throws -> ScopedSnapshot<BoundedCollection<WatchSkillSummary>> {
-        throw WatchCompanionError.unsupported(.skills)
+        await mutate(.controlTask(task: key, action: action), context: context)
     }
     public func skillDetail(key: SkillKey) async throws -> ScopedSnapshot<WatchSkillDetail> {
         throw WatchCompanionError.unsupported(.skillDetail)
     }
     public func skillContent(key: SkillKey, fileHandle: PathHandle?) async throws -> ScopedSnapshot<WatchSkillContent> {
         throw WatchCompanionError.unsupported(.skillContent)
-    }
-    public func memoryDocument(scope: ServerScope) async throws -> ScopedSnapshot<WatchMemoryDocument> {
-        throw WatchCompanionError.unsupported(.memoryDocument)
-    }
-    public func insightsAggregate(scope: ServerScope, days: InsightsDays) async throws -> ScopedSnapshot<WatchInsightsAggregate> {
-        throw WatchCompanionError.unsupported(.insightsAggregate)
     }
     public func workspace(session: SessionKey, parentPathHandle: PathHandle?) async throws -> ScopedSnapshot<BoundedCollection<WatchWorkspaceEntry>> {
         throw WatchCompanionError.unsupported(.workspace)
@@ -185,6 +260,20 @@ public struct WatchWireClient: WatchCompanionServicing, Sendable {
         try response.validate(against: envelope, receivedAt: now())
         switch (operation, response.result) {
         case (.sessions, .sessions(let value)):
+            return try cast(value)
+        case (.composerOptions, .composerOptions(let value)):
+            return try cast(value)
+        case (.tasks, .tasks(let value)):
+            return try cast(value)
+        case (.taskRuns, .taskRuns(let value)):
+            return try cast(value)
+        case (.taskRunDetail, .taskRunDetail(let value)):
+            return try cast(value)
+        case (.skills, .skills(let value)):
+            return try cast(value)
+        case (.memoryDocument, .memoryDocument(let value)):
+            return try cast(value)
+        case (.insightsAggregate, .insightsAggregate(let value)):
             return try cast(value)
         case (.transcript, .transcript(let value)):
             return try cast(value)

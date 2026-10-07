@@ -102,6 +102,93 @@ enum WatchVoiceNoteFilename {
     }
 }
 
+public struct WatchProfileSwitchRequest: Hashable, Codable, Sendable {
+    public let scope: ServerScope
+    public let expectedRevision: Revision
+    public let name: String
+
+    public init(scope: ServerScope, expectedRevision: Revision, name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.utf8.count <= ContractLimits.identifierUTF8Bytes else {
+            throw CommandValidationError.blankPayload
+        }
+        self.scope = scope
+        self.expectedRevision = expectedRevision
+        self.name = trimmed
+    }
+}
+
+public struct WatchSkillToggleRequest: Hashable, Codable, Sendable {
+    public let scope: ServerScope
+    public let expectedRevision: Revision
+    public let name: String
+    public let enabled: Bool
+
+    public init(scope: ServerScope, expectedRevision: Revision, name: String, enabled: Bool) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw IdentityValidationError.blankIdentifier }
+        self.scope = scope
+        self.expectedRevision = expectedRevision
+        self.name = trimmed
+        self.enabled = enabled
+    }
+}
+
+public struct WatchKanbanCreateRequest: Hashable, Codable, Sendable {
+    public let scope: ServerScope
+    public let expectedRevision: Revision
+    public let boardSlug: String
+    public let title: String
+    public let status: String
+
+    public init(scope: ServerScope, expectedRevision: Revision, boardSlug: String, title: String, status: String) throws {
+        let board = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cardTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let column = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !board.isEmpty, !cardTitle.isEmpty, ["triage", "todo", "ready"].contains(column) else {
+            throw IdentityValidationError.blankIdentifier
+        }
+        self.scope = scope
+        self.expectedRevision = expectedRevision
+        self.boardSlug = board
+        self.title = cardTitle
+        self.status = column
+    }
+}
+
+public struct WatchKanbanDispatchRequest: Hashable, Codable, Sendable {
+    public let scope: ServerScope
+    public let expectedRevision: Revision
+    public let boardSlug: String
+    public let dryRun: Bool
+
+    public init(scope: ServerScope, expectedRevision: Revision, boardSlug: String, dryRun: Bool) throws {
+        let board = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !board.isEmpty else { throw IdentityValidationError.blankIdentifier }
+        self.scope = scope
+        self.expectedRevision = expectedRevision
+        self.boardSlug = board
+        self.dryRun = dryRun
+    }
+}
+
+public struct WatchKanbanMoveRequest: Hashable, Codable, Sendable {
+    public let scope: ServerScope
+    public let expectedRevision: Revision
+    public let cardID: String
+    public let status: String
+
+    public init(scope: ServerScope, expectedRevision: Revision, cardID: String, status: String) throws {
+        let card = cardID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let column = status.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !card.isEmpty, !column.isEmpty else { throw IdentityValidationError.blankIdentifier }
+        self.scope = scope
+        self.expectedRevision = expectedRevision
+        self.cardID = card
+        self.status = column
+    }
+}
+
 public enum WatchWireMessage: Hashable, Codable, Sendable {
     case registry
     case request(WatchRequestEnvelope)
@@ -110,6 +197,11 @@ public enum WatchWireMessage: Hashable, Codable, Sendable {
     case transcribeFile(WatchVoiceNoteFileRef)
     case sendPhoto(WatchPhotoSendRequest)
     case sendPhotoFile(WatchPhotoFileRef)
+    case switchProfile(WatchProfileSwitchRequest)
+    case setSkillEnabled(WatchSkillToggleRequest)
+    case moveKanbanCard(WatchKanbanMoveRequest)
+    case createKanbanCard(WatchKanbanCreateRequest)
+    case dispatchKanban(WatchKanbanDispatchRequest)
 }
 
 public enum WatchWireReply: Hashable, Codable, Sendable {

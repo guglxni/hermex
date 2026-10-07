@@ -3,6 +3,7 @@ public protocol WatchCompanionServicing:Sendable{
  func registry()async->RegistrySnapshot
  func refreshSessions(scope:ServerScope,collection:SessionCollection,query:String?,localLimit:Int)async throws->ScopedSnapshot<BoundedCollection<WatchSessionSummary>>
  func composerOptions(scope:ServerScope)async throws->ScopedSnapshot<WatchComposerOptions>
+ func switchActiveProfile(scope:ServerScope,name:String,expectedRevision:Revision)async throws->String
  func transcript(key:SessionKey,before:Int?,limit:Int)async throws->ScopedSnapshot<WatchTranscript>
  func createSession(scope:ServerScope,profileID:ProfileID?,workspaceHandle:WorkspaceHandle?,context:CommandContext)async->CommandReceipt<SessionKey>
  func send(text:String,to key:SessionKey,context:CommandContext)async->CommandReceipt<RunKey>
@@ -32,9 +33,18 @@ public protocol WatchCompanionServicing:Sendable{
  func botEvents(for key:BotKey,replayEpoch:String?,afterSequence:Int?)->AsyncThrowingStream<WatchBotEvent,Error>
  func sendBot(text:String,to key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
  func interruptBot(key:BotKey,context:CommandContext)async->CommandReceipt<EmptyValue>
+ func setSkillEnabled(scope:ServerScope,name:String,enabled:Bool,expectedRevision:Revision)async throws
+ func moveKanbanCard(scope:ServerScope,cardID:String,status:String,expectedRevision:Revision)async throws
+ func createKanbanCard(scope:ServerScope,boardSlug:String,title:String,status:String,expectedRevision:Revision)async throws
+ func dispatchKanban(scope:ServerScope,boardSlug:String,dryRun:Bool,expectedRevision:Revision)async throws->String
 }
 
 public extension WatchCompanionServicing {
+ func switchActiveProfile(scope:ServerScope,name:String,expectedRevision:Revision)async throws->String{throw WatchCompanionError.unsupported(.composerOptions)}
+ func setSkillEnabled(scope:ServerScope,name:String,enabled:Bool,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.skills)}
+ func moveKanbanCard(scope:ServerScope,cardID:String,status:String,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.tasks)}
+ func createKanbanCard(scope:ServerScope,boardSlug:String,title:String,status:String,expectedRevision:Revision)async throws{throw WatchCompanionError.unsupported(.tasks)}
+ func dispatchKanban(scope:ServerScope,boardSlug:String,dryRun:Bool,expectedRevision:Revision)async throws->String{throw WatchCompanionError.unsupported(.tasks)}
  func respond(approval:ApprovalKey,choice:ApprovalChoice,context:CommandContext)async->CommandReceipt<EmptyValue>{currentPinAttentionRejection(context:context,operationKind:.respondApproval)}
  func respond(clarification:ClarificationKey,answer:String,context:CommandContext)async->CommandReceipt<EmptyValue>{currentPinAttentionRejection(context:context,operationKind:.respondClarification)}
  private func currentPinAttentionRejection(context:CommandContext,operationKind:WatchOperationKind)->CommandReceipt<EmptyValue>{

@@ -114,12 +114,19 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         )
         let items = rows.compactMap { row -> WatchSessionSummary? in
             guard let key = try? SessionKey(scope: scope, sessionID: row.sessionID) else { return nil }
+            // A long workspace path or title used to fail DTO validation and
+            // drop the whole row, so a server full of real sessions arrived as
+            // an empty wrist. Truncate the labels; only an unusable session id
+            // (blank or over the identity limit) drops the row.
+            let updatedAt = row.updatedAt.flatMap {
+                $0.timeIntervalSinceReferenceDate.isFinite ? $0 : nil
+            }
             return try? WatchSessionSummary(
                 key: key,
-                title: row.title,
-                profile: row.profile,
-                workspaceLabel: row.workspaceLabel,
-                updatedAt: row.updatedAt,
+                title: Self.boundedLabel(row.title, maxUTF8: 1024) ?? "Untitled",
+                profile: Self.boundedLabel(row.profile, maxUTF8: ContractLimits.identifierUTF8Bytes),
+                workspaceLabel: Self.boundedLabel(row.workspaceLabel, maxUTF8: ContractLimits.identifierUTF8Bytes),
+                updatedAt: updatedAt,
                 isPinned: row.isPinned,
                 isArchived: row.isArchived,
                 attention: row.attention,
@@ -127,9 +134,11 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
             )
         }
         let limited = Array(items.prefix(min(localLimit, 100)))
-        return try scoped(
-            scope,
-            BoundedCollection(items: limited, isTruncated: items.count > limited.count, maximumItems: 100)
+        return try scopedList(
+            scope: scope,
+            items: limited,
+            truncated: items.count > limited.count,
+            maximumItems: 100
         )
     }
 
@@ -458,7 +467,84 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
     }
 
     public func composerOptions(scope: ServerScope) async throws -> ScopedSnapshot<WatchComposerOptions> {
-        throw WatchCompanionError.unsupported(.composerOptions)
+        let urlString = try resolvedURL(for: scope)
+        let page = try await backend.listProfiles(urlString: urlString)
+        let projects = (try? await backend.listProjects(urlString: urlString, limit: 128)) ?? []
+        let profiles: [WatchComposerOptions.ProfileChoice] = page.profiles.compactMap { choice in
+            guard let id = try? ProfileID(choice.name) else { return nil }
+            return try? WatchComposerOptions.ProfileChoice(id: id, label: choice.label)
+        }
+        let workspaces: [WatchComposerOptions.WorkspaceChoice] = projects.compactMap { project in
+            guard let handle = try? WorkspaceHandle(project.id) else { return nil }
+            return try? WatchComposerOptions.WorkspaceChoice(handle: handle, label: project.name)
+        }
+        let active = page.activeName.flatMap { try? ProfileID($0) }
+        let options = try WatchComposerOptions(
+            scope: scope,
+            profiles: Array(profiles.prefix(128)),
+            workspaces: Array(workspaces.prefix(128)),
+            defaultProfileID: active,
+            defaultWorkspaceHandle: nil
+        )
+        return try scoped(scope, options)
+    }
+
+    public func switchActiveProfile(
+        scope: ServerScope,
+        name: String,
+        expectedRevision: Revision
+    ) async throws -> String {
+        guard matchesRevision(expectedRevision) else {
+            throw WatchCompanionError.scopeRejected
+        }
+        let urlString = try resolvedURL(for: scope)
+        try await backend.switchProfile(urlString: urlString, name: name)
+        return name
+    }
+
+    public func setSkillEnabled(
+        scope: ServerScope,
+        name: String,
+        enabled: Bool,
+        expectedRevision: Revision
+    ) async throws {
+        guard matchesRevision(expectedRevision) else { throw WatchCompanionError.scopeRejected }
+        let urlString = try resolvedURL(for: scope)
+        try await backend.setSkillEnabled(urlString: urlString, name: name, enabled: enabled)
+    }
+
+    public func createKanbanCard(
+        scope: ServerScope,
+        boardSlug: String,
+        title: String,
+        status: String,
+        expectedRevision: Revision
+    ) async throws {
+        guard matchesRevision(expectedRevision) else { throw WatchCompanionError.scopeRejected }
+        let urlString = try resolvedURL(for: scope)
+        try await backend.createKanbanCard(urlString: urlString, boardSlug: boardSlug, title: title, status: status)
+    }
+
+    public func dispatchKanban(
+        scope: ServerScope,
+        boardSlug: String,
+        dryRun: Bool,
+        expectedRevision: Revision
+    ) async throws -> String {
+        guard matchesRevision(expectedRevision) else { throw WatchCompanionError.scopeRejected }
+        let urlString = try resolvedURL(for: scope)
+        return try await backend.dispatchKanban(urlString: urlString, boardSlug: boardSlug, dryRun: dryRun)
+    }
+
+    public func moveKanbanCard(
+        scope: ServerScope,
+        cardID: String,
+        status: String,
+        expectedRevision: Revision
+    ) async throws {
+        guard matchesRevision(expectedRevision) else { throw WatchCompanionError.scopeRejected }
+        let urlString = try resolvedURL(for: scope)
+        try await backend.moveKanbanCard(urlString: urlString, cardID: cardID, status: status)
     }
 
     public func pendingApprovalHead(
@@ -477,18 +563,92 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         scope: ServerScope,
         localLimit: Int
     ) async throws -> ScopedSnapshot<BoundedCollection<WatchTaskSummary>> {
-        throw WatchCompanionError.unsupported(.tasks)
+        let urlString = try resolvedURL(for: scope)
+        let cap = min(max(localLimit, 1), 64)
+        let glances = try await backend.listTasks(urlString: urlString, limit: cap)
+        let items: [WatchTaskSummary] = glances.prefix(cap).compactMap { glance in
+            guard let key = try? TaskKey(scope: scope, jobID: glance.id) else { return nil }
+            return try? WatchTaskSummary(
+                key: key,
+                name: Self.boundedLabel(glance.name, maxUTF8: 1024) ?? "Untitled task",
+                schedule: Self.boundedLabel(glance.schedule, maxUTF8: 1024) ?? "Scheduled",
+                enabled: glance.enabled,
+                running: glance.running,
+                lastResult: Self.boundedLabel(glance.lastResult, maxUTF8: 2048),
+                lastRunAt: glance.lastRunAt.flatMap(Self.finiteDate),
+                nextRunAt: glance.nextRunAt.flatMap(Self.finiteDate),
+                failureSummary: Self.boundedLabel(glance.failureSummary, maxUTF8: 2048)
+            )
+        }
+        return try scopedList(
+            scope: scope,
+            items: items,
+            truncated: glances.count > items.count,
+            maximumItems: 64
+        )
     }
 
+    /// Newest first. A history row is a finished run's output file, so every
+    /// row reports `finished`; whether it succeeded lives in its output.
     public func taskRuns(
         key: TaskKey,
         page: PageRequest
     ) async throws -> ScopedSnapshot<BoundedPage<WatchTaskRun>> {
-        throw WatchCompanionError.unsupported(.taskRuns)
+        let urlString = try resolvedURL(for: key.scope)
+        let runs = try await backend.listTaskRuns(urlString: urlString, jobID: key.jobID, limit: page.limit)
+        let items: [WatchTaskRun] = runs.prefix(page.limit).compactMap { run in
+            let finished = run.finishedAt.flatMap(Self.finiteDate)
+            let started = finished.flatMap { end in
+                run.durationSeconds.flatMap { $0.isFinite && $0 >= 0 ? end.addingTimeInterval(-$0) : nil }
+            }
+            return try? WatchTaskRun(
+                task: key,
+                runID: run.id,
+                startedAt: started,
+                finishedAt: finished,
+                status: "finished",
+                output: nil,
+                isTruncated: false
+            )
+        }
+        return try scoped(
+            key.scope,
+            try BoundedPage(items: items, continuation: nil, isTruncated: runs.count > items.count, maximumItems: 50)
+        )
     }
 
+    /// One run's output, shaped and clipped for the wrist.
     public func taskRunDetail(key: TaskKey, runID: String) async throws -> ScopedSnapshot<WatchTaskRunDetail> {
-        throw WatchCompanionError.unsupported(.taskRunDetail)
+        let urlString = try resolvedURL(for: key.scope)
+        let raw = try await backend.taskRunOutput(urlString: urlString, jobID: key.jobID, runID: runID)
+        let normalized = raw.map { WatchTranscriptProjection.wristMarkdown(WatchTaskRunProjection.responseBody($0)) }
+        let clipped = normalized.flatMap {
+            WatchTranscriptProjection.clippedMarkdown($0, max: Self.maximumTaskOutputCharacters)
+        }
+        let run = try WatchTaskRun(
+            task: key,
+            runID: runID,
+            startedAt: nil,
+            finishedAt: nil,
+            status: "finished",
+            output: nil,
+            isTruncated: false
+        )
+        return try scoped(
+            key.scope,
+            WatchTaskRunDetail(
+                run: run,
+                output: clipped,
+                outputTruncated: (normalized?.count ?? 0) > (clipped?.count ?? 0)
+            )
+        )
+    }
+
+    /// Wrist-sized run output; the full file is on iPhone.
+    static let maximumTaskOutputCharacters = 1_500
+
+    private static func finiteDate(_ date: Date) -> Date? {
+        date.timeIntervalSinceReferenceDate.isFinite ? date : nil
     }
 
     public func controlTask(
@@ -496,7 +656,25 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         action: TaskControl,
         context: CommandContext
     ) async -> CommandReceipt<EmptyValue> {
-        rejected(context, kind: .controlTask)
+        guard WatchMutationOperation.currentlyEnabledKinds.contains(.controlTask) else {
+            return rejected(context, kind: .controlTask)
+        }
+        guard let urlString = try? resolvedURL(for: key.scope), matchesRevision(context) else {
+            return rejected(context, kind: .controlTask)
+        }
+        do {
+            try await backend.controlTask(urlString: urlString, jobID: key.jobID, action: action.rawValue)
+            let receipt = try MutationReceipt(
+                context: context,
+                operationKind: .controlTask,
+                phase: .acknowledged,
+                updatedAt: now(),
+                nonSecretResultID: key.jobID
+            )
+            return CommandReceipt(receipt: receipt, value: EmptyValue())
+        } catch {
+            return rejected(context, kind: .controlTask)
+        }
     }
 
     public func skills(
@@ -504,7 +682,57 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         query: String?,
         localLimit: Int
     ) async throws -> ScopedSnapshot<BoundedCollection<WatchSkillSummary>> {
-        throw WatchCompanionError.unsupported(.skills)
+        let urlString = try resolvedURL(for: scope)
+        let cap = min(max(localLimit, 1), 128)
+        let glances: [WatchPhoneSkillGlance]
+        if let request = WatchGlanceQuery.kanbanRequest(from: query) {
+            let board = try await backend.listKanbanBoard(
+                urlString: urlString,
+                slug: request.slug,
+                includeArchived: request.includeArchived,
+                onlyMine: request.onlyMine,
+                limit: cap
+            )
+            let chrome = WatchKanbanBoardChrome(
+                name: board.name,
+                slug: board.slug,
+                columns: board.columns,
+                boards: board.boards
+            )
+            let header = WatchPhoneSkillGlance(name: WatchKanbanBoardChrome.cardID, summary: chrome.wireSummary, enabled: nil)
+            let cards = board.cards.map { card in
+                WatchPhoneSkillGlance(
+                    name: card.id,
+                    summary: WatchKanbanCard(
+                        id: card.id,
+                        title: card.title,
+                        status: card.status,
+                        assignee: card.assignee,
+                        priority: card.priority,
+                        body: card.body,
+                        tenant: card.tenant,
+                        commentCount: card.commentCount,
+                        linkCount: card.linkCount,
+                        ageSeconds: card.ageSeconds,
+                        skills: card.skills
+                    ).wireSummary,
+                    enabled: nil
+                )
+            }
+            glances = [header] + cards
+        } else {
+            glances = try await backend.listSkills(urlString: urlString, query: query, limit: cap)
+        }
+        let items: [WatchSkillSummary] = glances.prefix(cap).compactMap { glance in
+            guard let key = try? SkillKey(scope: scope, name: glance.name) else { return nil }
+            return try? WatchSkillSummary(key: key, summary: glance.summary, enabled: glance.enabled)
+        }
+        return try scopedList(
+            scope: scope,
+            items: items,
+            truncated: glances.count > items.count,
+            maximumItems: 128
+        )
     }
 
     public func skillDetail(key: SkillKey) async throws -> ScopedSnapshot<WatchSkillDetail> {
@@ -519,14 +747,56 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
     }
 
     public func memoryDocument(scope: ServerScope) async throws -> ScopedSnapshot<WatchMemoryDocument> {
-        throw WatchCompanionError.unsupported(.memoryDocument)
+        let urlString = try resolvedURL(for: scope)
+        let glances = try await backend.memoryGlance(urlString: urlString)
+        var seen = Set<String>()
+        let sections: [WatchMemorySection] = glances.prefix(2).compactMap { glance in
+            guard seen.insert(glance.section).inserted else { return nil }
+            guard let key = try? MemoryKey(scope: scope, remoteID: glance.section) else { return nil }
+            return try? WatchMemorySection(
+                key: key,
+                section: glance.section,
+                redactedContent: Self.boundedLabel(glance.text, maxUTF8: 16_384) ?? "",
+                isTruncated: glance.isTruncated || glance.text.utf8.count > 16_384
+            )
+        }
+        return try scoped(scope, try WatchMemoryDocument(sections: sections))
     }
 
     public func insightsAggregate(
         scope: ServerScope,
         days: InsightsDays
     ) async throws -> ScopedSnapshot<WatchInsightsAggregate> {
-        throw WatchCompanionError.unsupported(.insightsAggregate)
+        let urlString = try resolvedURL(for: scope)
+        let glance = try await backend.usageGlance(urlString: urlString, days: days.value)
+        let models = Array(glance.models.prefix(32))
+        let usage: [WatchModelUsage] = glance.modelUsage.prefix(32).compactMap { model in
+            guard let name = Self.boundedLabel(model.name, maxUTF8: ContractLimits.identifierUTF8Bytes),
+                  model.cost.isFinite
+            else { return nil }
+            return try? WatchModelUsage(
+                name: name,
+                totalTokens: max(model.totalTokens, 0),
+                cost: Decimal(max(model.cost, 0)),
+                sessions: max(model.sessions, 0)
+            )
+        }
+        let daily = Array(glance.dailyTokens.suffix(min(days.value, 90)).map { max($0, 0) })
+        let aggregate = try WatchInsightsAggregate(
+            days: days,
+            totalSessions: max(glance.totalSessions, 0),
+            totalMessages: max(glance.totalMessages, 0),
+            totalInputTokens: max(glance.totalInputTokens, 0),
+            totalOutputTokens: max(glance.totalOutputTokens, 0),
+            totalTokens: max(glance.totalTokens, 0),
+            totalCost: glance.totalCost.isFinite ? Decimal(max(glance.totalCost, 0)) : 0,
+            models: try BoundedCollection(items: models, isTruncated: glance.models.count > models.count),
+            dailyTokens: try BoundedCollection(items: daily, isTruncated: glance.dailyTokens.count > daily.count),
+            activityByDay: try BoundedCollection(items: [], isTruncated: false),
+            activityByHour: try BoundedCollection(items: [], isTruncated: false),
+            modelUsage: try BoundedCollection(items: usage, isTruncated: glance.modelUsage.count > usage.count, maximumItems: 32)
+        )
+        return try scoped(scope, aggregate)
     }
 
     public func workspace(
@@ -680,6 +950,27 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
         }
     }
 
+    /// Fits a label into the watch DTO byte budget. Returns nil for blank input.
+    private static func boundedLabel(_ value: String?, maxUTF8: Int) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, maxUTF8 > 0 else { return nil }
+        if trimmed.utf8.count <= maxUTF8 { return trimmed }
+        let ellipsis = "…"
+        let budget = maxUTF8 - ellipsis.utf8.count
+        guard budget > 0 else { return nil }
+        var kept = ""
+        var used = 0
+        for character in trimmed {
+            let next = used + character.utf8.count
+            if next > budget { break }
+            kept.append(character)
+            used = next
+        }
+        guard !kept.isEmpty else { return nil }
+        return kept + ellipsis
+    }
+
     private func resolvedURL(for scope: ServerScope) throws -> String {
         try storage.withLock { state in
             guard state.fence.decision(for: scope) == .accept, let url = state.urlByServer[scope.server] else {
@@ -695,6 +986,31 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
 
     private func matchesRevision(_ revision: Revision) -> Bool {
         storage.withLock { $0.fence.registryRevision == revision }
+    }
+
+    /// Drops rows from the end until the encoded snapshot fits a `sendMessage`
+    /// reply. One oversized list used to be dropped by WatchConnectivity with
+    /// no error, and the watch stayed on its spinner.
+    private func scopedList<Item: Codable & Sendable>(
+        scope: ServerScope,
+        items: [Item],
+        truncated: Bool,
+        maximumItems: Int
+    ) throws -> ScopedSnapshot<BoundedCollection<Item>> {
+        var kept = items
+        var isTruncated = truncated
+        while true {
+            let snapshot = try scoped(
+                scope,
+                try BoundedCollection(items: kept, isTruncated: isTruncated, maximumItems: maximumItems)
+            )
+            let encoded = try JSONEncoder().encode(snapshot)
+            if kept.isEmpty || encoded.count <= WatchVoiceNoteWire.maximumSnapshotJSONBytes {
+                return snapshot
+            }
+            kept.removeLast()
+            isTruncated = true
+        }
     }
 
     private func scoped<Value: Codable & Sendable>(_ scope: ServerScope, _ value: Value) throws -> ScopedSnapshot<Value> {

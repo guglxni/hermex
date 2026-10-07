@@ -95,8 +95,12 @@ A `ServerScope` derived from the phone install epoch and a stable per-URL `Serve
 _Avoid_: Server URL on watch
 
 **Now**:
-The watch home surface: the preferred session plus speak and stop. Preference is a running session, then one that needs attention, then a pinned session, then the most recently updated.
+The watch home surface: the preferred session plus reply controls (type, speak, photo, listen) and stop. Preference is a running session, then one that needs attention, then a pinned session, then the most recently updated.
 _Avoid_: Watch chat, mini iPhone, Active session (that copy is reserved for a truthful live state)
+
+**Watch glance**:
+A screen below Now that answers one question from the phone's data: Sessions, Tasks, Kanban, Usage, Profile, Skills, Memory, or Projects. Glances are read-only except Profile, which switches the active profile.
+_Avoid_: Watch Kanban editor, watch settings
 
 **Watch voice note**:
 A wrist recording (up to 5 minutes, matching iOS) sent to the iPhone over WatchConnectivity. Clips that no longer fit `sendMessage` travel through `WCSession.transferFile`. The phone transcribes through `/api/transcribe`, uploads the same clip through `/api/upload`, and starts chat with the bare transcript plus that attachment — the same contract as iOS Composer voice notes. The watch does not talk to `hermes-webui`.

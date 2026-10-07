@@ -226,7 +226,9 @@ final class SessionListViewModel {
         defer { isLoading = false }
 
         do {
-            let response = try await client.sessions()
+            let response = try await client.sidebarSessions(
+                revealAgentSessions: SessionRowDisplaySettings.showsCliSessions(for: server)
+            )
             let visibleSessions = (response.sessions ?? [])
                 .filter {
                     Self.nonEmpty($0.sessionId) != nil

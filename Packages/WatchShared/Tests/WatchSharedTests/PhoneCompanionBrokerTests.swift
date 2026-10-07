@@ -26,6 +26,22 @@ import Testing
         var startedChats: [(sessionID: String, message: String, attachments: [WatchChatAttachment]?)] = []
         var mediaByPath: [String: Data] = [:]
         var uploadedIsImage = false
+        var profiles = WatchPhoneProfilePage(profiles: [], activeName: nil)
+        var switchedProfile: String?
+        var tasks: [WatchPhoneTaskGlance] = []
+        var skills: [WatchPhoneSkillGlance] = []
+        var memory: [WatchPhoneMemoryGlance] = []
+        var usage = WatchPhoneUsageGlance(
+            days: 30, totalSessions: 0, totalMessages: 0,
+            totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0,
+            totalCost: 0, models: []
+        )
+        var projects: [WatchPhoneProjectGlance] = []
+        var kanban: [WatchPhoneKanbanCardGlance] = []
+        var controlledTasks: [(jobID: String, action: String)] = []
+        var skillToggles: [(name: String, enabled: Bool)] = []
+        var kanbanMoves: [(cardID: String, status: String)] = []
+        var failWrites = false
 
         init(
             accounts: [WatchPhoneServerAccount],
@@ -90,6 +106,51 @@ import Testing
             if failTranscribe { throw WatchCompanionError.backend(.timeout) }
             return "transcribed note"
         }
+        func listProfiles(urlString: String) async throws -> WatchPhoneProfilePage { profiles }
+        func switchProfile(urlString: String, name: String) async throws { switchedProfile = name }
+        func listTasks(urlString: String, limit: Int) async throws -> [WatchPhoneTaskGlance] { Array(tasks.prefix(limit)) }
+        func listSkills(urlString: String, query: String?, limit: Int) async throws -> [WatchPhoneSkillGlance] { Array(skills.prefix(limit)) }
+        func memoryGlance(urlString: String) async throws -> [WatchPhoneMemoryGlance] { memory }
+        func usageGlance(urlString: String, days: Int) async throws -> WatchPhoneUsageGlance { usage }
+        func listProjects(urlString: String, limit: Int) async throws -> [WatchPhoneProjectGlance] { Array(projects.prefix(limit)) }
+        func listKanbanCards(urlString: String, limit: Int) async throws -> [WatchPhoneKanbanCardGlance] { Array(kanban.prefix(limit)) }
+        var kanbanBoardQuery: (slug: String?, includeArchived: Bool, onlyMine: Bool)?
+        func listKanbanBoard(
+            urlString: String,
+            slug: String?,
+            includeArchived: Bool,
+            onlyMine: Bool,
+            limit: Int
+        ) async throws -> WatchPhoneKanbanBoardGlance {
+            kanbanBoardQuery = (slug, includeArchived, onlyMine)
+            return WatchPhoneKanbanBoardGlance(
+                name: "Default",
+                slug: slug ?? "default",
+                columns: WatchKanbanStatus.boardOrder,
+                boards: [WatchKanbanBoardChrome.Choice(slug: "default", name: "Default")],
+                cards: Array(kanban.prefix(limit))
+            )
+        }
+        func controlTask(urlString: String, jobID: String, action: String) async throws {
+            if failWrites { throw WatchCompanionError.backend(.timeout) }
+            controlledTasks.append((jobID, action))
+        }
+        func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws {
+            if failWrites { throw WatchCompanionError.backend(.timeout) }
+            skillToggles.append((name, enabled))
+        }
+        func moveKanbanCard(urlString: String, cardID: String, status: String) async throws {
+            if failWrites { throw WatchCompanionError.backend(.timeout) }
+            kanbanMoves.append((cardID, status))
+        }
+        var taskRuns: [WatchPhoneTaskRun] = []
+        var taskOutput: String?
+        var requestedRunLimit: Int?
+        func listTaskRuns(urlString: String, jobID: String, limit: Int) async throws -> [WatchPhoneTaskRun] {
+            requestedRunLimit = limit
+            return taskRuns
+        }
+        func taskRunOutput(urlString: String, jobID: String, runID: String) async throws -> String? { taskOutput }
     }
 
     private func makeBroker(_ backend: ScriptedBackend, epoch: InstallationEpoch = InstallationEpoch(rawValue: UUID())) -> PhoneCompanionBroker {
@@ -203,6 +264,40 @@ import Testing
         #expect(sessions.value.items.count == 1)
         #expect(sessions.value.items[0].title == "Planning")
         #expect(sessions.value.items[0].key.scope == scope)
+
+        let longWorkspace = String(repeating: "w", count: 400)
+        let longTitle = String(repeating: "t", count: 1_100)
+        let longBackend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: [
+                WatchPhoneSessionRow(
+                    sessionID: "long",
+                    title: longTitle,
+                    profile: String(repeating: "p", count: 300),
+                    workspaceLabel: longWorkspace,
+                    updatedAt: nil,
+                    isPinned: true,
+                    isArchived: false,
+                    attention: false,
+                    runState: nil
+                ),
+            ]
+        )
+        let longBroker = makeBroker(longBackend)
+        let longRegistry = await longBroker.registry()
+        let longScope = try #require(longRegistry.entries.first?.scope)
+        let kept = try await longBroker.refreshSessions(
+            scope: longScope,
+            collection: .current,
+            query: nil,
+            localLimit: 20
+        )
+        #expect(kept.value.items.count == 1)
+        #expect(kept.value.items[0].title.utf8.count <= 1024)
+        #expect(kept.value.items[0].title.hasSuffix("…"))
+        #expect((kept.value.items[0].workspaceLabel?.utf8.count ?? 0) <= 256)
+        #expect((kept.value.items[0].profile?.utf8.count ?? 0) <= 256)
+        #expect(kept.value.items[0].isPinned)
 
         let transcript = try await broker.transcript(key: sessions.value.items[0].key, before: nil, limit: 20)
         #expect(transcript.value.blocks.count == 1)
@@ -613,5 +708,199 @@ import Testing
         let attachments = try #require(backend.startedChats[0].attachments)
         #expect(attachments[0].path == "/tmp/workspace/watch-photo.jpg")
         #expect(attachments[0].isImage)
+    }
+
+    @Test func sidebarGlancesMapProfilesTasksAndKanbanThroughTheBroker() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        backend.profiles = WatchPhoneProfilePage(
+            profiles: [WatchPhoneProfileChoice(name: "default", label: "Default\ngpt-5-6-sol")],
+            activeName: "default"
+        )
+        backend.projects = [WatchPhoneProjectGlance(id: "proj-1", name: "Hermex")]
+        backend.tasks = [WatchPhoneTaskGlance(id: "job-1", name: "Standup", schedule: "daily", enabled: true, running: false, lastResult: nil)]
+        backend.kanban = [WatchPhoneKanbanCardGlance(
+            id: "card-1", title: "Watch layout", status: "running", assignee: "default", priority: 2,
+            tenant: "studio", commentCount: 2, linkCount: 1, ageSeconds: 3_700, skills: ["swift"]
+        )]
+        backend.memory = [WatchPhoneMemoryGlance(section: "memory", text: "Prefer short notes")]
+        backend.usage = WatchPhoneUsageGlance(
+            days: 30, totalSessions: 4, totalMessages: 12,
+            totalInputTokens: 100, totalOutputTokens: 40, totalTokens: 140,
+            totalCost: 1.5, models: ["gpt-5-6-sol"]
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+
+        let options = try await broker.composerOptions(scope: scope).value
+        #expect(options.profiles.map(\.label) == ["Default\ngpt-5-6-sol"])
+        #expect(options.defaultProfileID?.rawValue == "default")
+        #expect(options.workspaces.map(\.label) == ["Hermex"])
+
+        let switched = try await broker.switchActiveProfile(scope: scope, name: "builder", expectedRevision: registry.revision)
+        #expect(switched == "builder")
+        #expect(backend.switchedProfile == "builder")
+
+        let tasks = try await broker.tasks(scope: scope, localLimit: 8).value.items
+        #expect(tasks.map(\.name) == ["Standup"])
+
+        let cards = try await broker.skills(scope: scope, query: WatchGlanceQuery.kanban, localLimit: 8).value.items
+        #expect(cards.first?.key.name == WatchKanbanBoardChrome.cardID)
+        let header = try #require(cards.first?.summary)
+        let chrome = try #require(WatchKanbanBoardChrome(wireSummary: header))
+        #expect(chrome.name == "Default")
+        #expect(chrome.columns == WatchKanbanStatus.boardOrder)
+        let cardSummary = try #require(cards.first { $0.key.name == "card-1" })
+        let card = WatchKanbanCard(id: cardSummary.key.name, wireSummary: cardSummary.summary)
+        #expect(card.title == "Watch layout")
+        #expect(card.status == "running")
+        #expect(card.assignee == "default")
+        #expect(card.priority == 2)
+        #expect(card.tenant == "studio")
+        #expect(card.commentCount == 2)
+        #expect(card.linkCount == 1)
+        #expect(card.ageSeconds == 3_700)
+        #expect(card.skills == ["swift"])
+        _ = try await broker.skills(
+            scope: scope,
+            query: WatchGlanceQuery.kanban(slug: "ops", includeArchived: true, onlyMine: true),
+            localLimit: 8
+        )
+        #expect(backend.kanbanBoardQuery?.slug == "ops")
+        #expect(backend.kanbanBoardQuery?.includeArchived == true)
+        #expect(backend.kanbanBoardQuery?.onlyMine == true)
+
+        let memory = try await broker.memoryDocument(scope: scope).value
+        #expect(memory.sections.map(\.section) == ["memory"])
+
+        let usage = try await broker.insightsAggregate(scope: scope, days: try InsightsDays(30)).value
+        #expect(usage.totalSessions == 4)
+        #expect(usage.models.items == ["gpt-5-6-sol"])
+    }
+
+    /// A full task list with long names used to exceed `sendMessage` and never
+    /// arrive, so Tasks stayed on its spinner. The phone keeps a prefix that fits.
+    @Test func oversizedTaskListFitsTheWatchReply() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let fat = String(repeating: "n", count: 900)
+        backend.tasks = (0..<40).map { index in
+            WatchPhoneTaskGlance(
+                id: "job-\(index)",
+                name: fat,
+                schedule: fat,
+                enabled: true,
+                running: false,
+                lastResult: fat,
+                failureSummary: fat
+            )
+        }
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let fitted = try await broker.tasks(scope: scope, localLimit: 64)
+        let encoded = try JSONEncoder().encode(fitted)
+        #expect(encoded.count <= WatchVoiceNoteWire.maximumSnapshotJSONBytes)
+        #expect(fitted.value.isTruncated)
+        #expect(!fitted.value.items.isEmpty)
+    }
+
+    @Test func wristWritesReachTheBackendWithTheCurrentRevision() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+
+        let receipt = await broker.controlTask(
+            key: try TaskKey(scope: scope, jobID: "job-1"),
+            action: .run,
+            context: try context(scope: scope, revision: registry.revision)
+        )
+        #expect(receipt.receipt.phase == .acknowledged)
+        #expect(backend.controlledTasks.map(\.action) == ["run"])
+
+        try await broker.setSkillEnabled(scope: scope, name: "web-search", enabled: false, expectedRevision: registry.revision)
+        #expect(backend.skillToggles.map(\.enabled) == [false])
+
+        try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", expectedRevision: registry.revision)
+        #expect(backend.kanbanMoves.map(\.status) == ["Done"])
+    }
+
+    /// Reads are fenced only on the scope, writes also on the registry revision.
+    /// A watch holding a revision the iPhone has moved past therefore kept
+    /// loading every list while every wrist action was rejected.
+    @Test func wristWritesAreRejectedWhenTheRevisionIsStale() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+        let stale = Revision(registry.revision.rawValue + 7)
+
+        // Reads still work on the same stale state.
+        _ = try await broker.tasks(scope: scope, localLimit: 8)
+
+        let receipt = await broker.controlTask(
+            key: try TaskKey(scope: scope, jobID: "job-1"),
+            action: .run,
+            context: try context(scope: scope, revision: stale)
+        )
+        #expect(receipt.receipt.phase == .rejected)
+        #expect(backend.controlledTasks.isEmpty)
+
+        await #expect(throws: WatchCompanionError.scopeRejected) {
+            try await broker.setSkillEnabled(scope: scope, name: "web-search", enabled: false, expectedRevision: stale)
+        }
+        await #expect(throws: WatchCompanionError.scopeRejected) {
+            try await broker.moveKanbanCard(scope: scope, cardID: "card-1", status: "Done", expectedRevision: stale)
+        }
+        await #expect(throws: WatchCompanionError.scopeRejected) {
+            _ = try await broker.switchActiveProfile(scope: scope, name: "builder", expectedRevision: stale)
+        }
+        #expect(backend.skillToggles.isEmpty)
+        #expect(backend.kanbanMoves.isEmpty)
+        #expect(backend.switchedProfile == nil)
+    }
+
+    @Test func wristWriteFailureStaysAFailure() async throws {
+        let backend = ScriptedBackend(
+            accounts: [WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")],
+            sessions: []
+        )
+        backend.failWrites = true
+        let broker = makeBroker(backend)
+        let registry = await broker.registry()
+        let scope = try #require(registry.entries.first?.scope)
+
+        let receipt = await broker.controlTask(
+            key: try TaskKey(scope: scope, jobID: "job-1"),
+            action: .pause,
+            context: try context(scope: scope, revision: registry.revision)
+        )
+        #expect(receipt.receipt.phase == .rejected)
+        await #expect(throws: (any Error).self) {
+            try await broker.setSkillEnabled(scope: scope, name: "web-search", enabled: true, expectedRevision: registry.revision)
+        }
+    }
+
+    private func context(scope: ServerScope, revision: Revision) throws -> CommandContext {
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        return try CommandContext(
+            stableCommandID: CommandID(rawValue: UUID()),
+            scope: scope,
+            expectedRevision: revision,
+            createdAt: created,
+            expiresAt: created.addingTimeInterval(60)
+        )
     }
 }
