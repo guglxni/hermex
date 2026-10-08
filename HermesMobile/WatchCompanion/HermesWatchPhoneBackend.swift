@@ -48,12 +48,20 @@ enum WatchHermesRoute {
         }
     }
 
+    /// A wrist create never picks a workspace. Omitting the kind lets a project
+    /// Board keep its worktree; sending `"scratch"` would opt out of that project.
+    static func createWorkspaceKind() -> String? { nil }
+
     /// Hermes can land a Ready request in To Do or Review. Success follows that rule.
-    static func kanbanMoveSucceeded(requested: String, landed: String?, backend: KanbanBackend) -> Bool {
+    /// `from` is the Card's status before the write. A nil `from` cannot tell a
+    /// no-op from a host that moved the Card, so a Ready landing in To Do still counts.
+    static func kanbanMoveSucceeded(
+        requested: String, landed: String?, from previous: String? = nil, backend: KanbanBackend
+    ) -> Bool {
         let policy: WatchKanbanMovePolicy = backend == .hermes ? .hermes : .webui
         let status = requested.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard WatchKanbanStatus.allowsDestination(status, policy: policy) else { return false }
-        return backend.accepts(landed?.lowercased(), requested: status, from: nil)
+        return backend.accepts(landed?.lowercased(), requested: status, from: previous?.lowercased())
     }
 
     static func sessionRows(
@@ -371,8 +379,9 @@ struct HermesWatchPhoneBackend {
             let client = HermesKanbanClient(http: try self.connection(for: urlString).http)
             let response = try await client.createKanbanCard(KanbanCreateCardRequest(
                 board: boardSlug, title: title, body: nil, status: status, priority: nil,
-                assignee: nil, tenant: nil, workspaceKind: "scratch", workspacePath: nil,
-                skills: nil, maxRuntimeSeconds: nil, prerequisiteID: nil, idempotencyKey: UUID().uuidString
+                assignee: nil, tenant: nil, workspaceKind: WatchHermesRoute.createWorkspaceKind(),
+                workspacePath: nil, skills: nil, maxRuntimeSeconds: nil, prerequisiteID: nil,
+                idempotencyKey: UUID().uuidString
             ))
             _ = try KanbanCardMutationValidator.validate(response, expectedCardID: nil)
         }
@@ -388,18 +397,27 @@ struct HermesWatchPhoneBackend {
 
     func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
         try await attempt {
-            guard WatchKanbanStatus.allowsDestination(status, policy: .hermes) else {
+            let requested = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard WatchKanbanStatus.allowsDestination(requested, policy: .hermes) else {
                 throw WatchCompanionError.backend(.invalidResponse)
             }
             let slug = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !slug.isEmpty else { throw WatchCompanionError.backend(.invalidResponse) }
             let client = HermesKanbanClient(http: try self.connection(for: urlString).http)
+            // Complete is legal only from Review. The watch hides the other
+            // columns; this read is what the host has now, so a stale glance
+            // cannot finish a Card the host has already moved.
+            let detail = try await client.kanbanCardDetail(KanbanCardDetailRequest(cardID: cardID, board: slug))
+            let previous = detail.card?.status?.rawValue
+            if requested == "done", previous?.lowercased() != "review" {
+                throw WatchCompanionError.backend(.invalidResponse)
+            }
             let response = try await client.setKanbanCardStatus(
-                KanbanCardStatusRequest(cardID: cardID, board: slug, status: status)
+                KanbanCardStatusRequest(cardID: cardID, board: slug, status: requested)
             )
             let card = try KanbanCardMutationValidator.validate(response, expectedCardID: cardID)
             guard WatchHermesRoute.kanbanMoveSucceeded(
-                requested: status, landed: card.status?.rawValue, backend: .hermes
+                requested: requested, landed: card.status?.rawValue, from: previous, backend: .hermes
             ) else {
                 throw WatchCompanionError.backend(.invalidResponse)
             }

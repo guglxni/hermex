@@ -367,8 +367,15 @@ final class WatchHermesRouteTests: XCTestCase {
         """#)
         let running = WatchHermesRoute.runningJobIDs(CronJobList(hermesJobs: [job]))
         XCTAssertTrue(running.contains("job-1"))
+        XCTAssertNil(WatchHermesRoute.createWorkspaceKind())
         XCTAssertFalse(WatchHermesRoute.kanbanMoveSucceeded(requested: "todo", landed: "todo", backend: .hermes))
         XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "ready", landed: "todo", backend: .hermes))
+        XCTAssertFalse(WatchHermesRoute.kanbanMoveSucceeded(
+            requested: "ready", landed: "todo", from: "todo", backend: .hermes
+        ))
+        XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(
+            requested: "ready", landed: "todo", from: "blocked", backend: .hermes
+        ))
         XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "done", landed: "done", backend: .hermes))
         XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "todo", landed: "todo", backend: .webui))
         let snapshot = KanbanBoardSnapshot(
