@@ -223,6 +223,13 @@ public struct WatchKanbanBoardChrome: Codable, Hashable, Sendable {
     public var slug: String
     public var columns: [String]
     public var boards: [Choice]
+    /// `"webui"` or `"hermes"`. Absent on glances from a phone that predates the
+    /// field; the watch then keeps webui destinations.
+    public var movePolicy: String?
+
+    public var resolvedMovePolicy: WatchKanbanMovePolicy {
+        WatchKanbanMovePolicy(rawValue: movePolicy ?? "") ?? .webui
+    }
 
     public struct Choice: Codable, Hashable, Sendable {
         public var slug: String
@@ -234,11 +241,12 @@ public struct WatchKanbanBoardChrome: Codable, Hashable, Sendable {
         }
     }
 
-    public init(name: String, slug: String, columns: [String], boards: [Choice]) {
+    public init(name: String, slug: String, columns: [String], boards: [Choice], movePolicy: String? = nil) {
         self.name = name
         self.slug = slug
         self.columns = columns
         self.boards = boards
+        self.movePolicy = movePolicy
     }
 
     public static var placeholder: WatchKanbanBoardChrome {
@@ -424,19 +432,23 @@ public struct WatchPhoneKanbanBoardGlance: Sendable, Equatable {
     public var columns: [String]
     public var boards: [WatchKanbanBoardChrome.Choice]
     public var cards: [WatchPhoneKanbanCardGlance]
+    /// Raw `WatchKanbanMovePolicy` carried onto the glance the watch already reads.
+    public var movePolicy: String?
 
     public init(
         name: String,
         slug: String,
         columns: [String],
         boards: [WatchKanbanBoardChrome.Choice],
-        cards: [WatchPhoneKanbanCardGlance]
+        cards: [WatchPhoneKanbanCardGlance],
+        movePolicy: String? = nil
     ) {
         self.name = name
         self.slug = slug
         self.columns = columns
         self.boards = boards
         self.cards = cards
+        self.movePolicy = movePolicy
     }
 }
 

@@ -131,6 +131,7 @@ import UniformTypeIdentifiers
         func listProjects(urlString: String, limit: Int) async throws -> [WatchPhoneProjectGlance] { Array(projects.prefix(limit)) }
         func listKanbanCards(urlString: String, limit: Int) async throws -> [WatchPhoneKanbanCardGlance] { Array(kanban.prefix(limit)) }
         var kanbanBoardQuery: (slug: String?, includeArchived: Bool, onlyMine: Bool)?
+        var kanbanMovePolicy: String?
         func listKanbanBoard(
             urlString: String,
             slug: String?,
@@ -144,7 +145,8 @@ import UniformTypeIdentifiers
                 slug: slug ?? "default",
                 columns: WatchKanbanStatus.boardOrder,
                 boards: [WatchKanbanBoardChrome.Choice(slug: "default", name: "Default")],
-                cards: Array(kanban.prefix(limit))
+                cards: Array(kanban.prefix(limit)),
+                movePolicy: kanbanMovePolicy
             )
         }
         func controlTask(urlString: String, jobID: String, action: String) async throws {
@@ -856,10 +858,13 @@ import UniformTypeIdentifiers
         let tasks = try await broker.tasks(scope: scope, localLimit: 8).value.items
         #expect(tasks.map(\.name) == ["Standup"])
 
+        backend.kanbanMovePolicy = WatchKanbanMovePolicy.hermes.rawValue
         let cards = try await broker.skills(scope: scope, query: WatchGlanceQuery.kanban, localLimit: 8).value.items
         #expect(cards.first?.key.name == WatchKanbanBoardChrome.cardID)
         let header = try #require(cards.first?.summary)
         let chrome = try #require(WatchKanbanBoardChrome(wireSummary: header))
+        #expect(chrome.resolvedMovePolicy == .hermes)
+        #expect(WatchKanbanStatus.moveDestinations(from: "todo", policy: chrome.resolvedMovePolicy) == ["triage", "ready"])
         #expect(chrome.name == "Default")
         #expect(chrome.columns == WatchKanbanStatus.boardOrder)
         let cardSummary = try #require(cards.first { $0.key.name == "card-1" })

@@ -118,6 +118,17 @@ import Testing
         #expect(WatchKanbanStatus.moveDestinations(from: "archived").isEmpty)
         #expect(!WatchKanbanStatus.moveDestinations(from: "todo").contains("running"))
         #expect(!WatchKanbanStatus.moveDestinations(from: "todo").contains("blocked"))
+        #expect(WatchKanbanStatus.moveDestinations(from: "todo", policy: .hermes) == ["triage", "ready"])
+        #expect(WatchKanbanStatus.moveDestinations(from: "review", policy: .hermes) == ["triage", "ready", "done"])
+        #expect(WatchKanbanStatus.moveDestinations(from: "scheduled", policy: .hermes) == ["triage", "ready"])
+        #expect(WatchKanbanStatus.moveDestinations(from: "ready", policy: .hermes) == ["triage"])
+        #expect(WatchKanbanStatus.moveDestinations(from: "done", policy: .hermes) == ["triage", "ready"])
+        #expect(WatchKanbanStatus.moveDestinations(from: "archived", policy: .hermes).isEmpty)
+        #expect(!WatchKanbanStatus.allowsDestination("todo", policy: .hermes))
+        #expect(!WatchKanbanStatus.allowsDestination("review", policy: .hermes))
+        #expect(WatchKanbanStatus.allowsDestination("done", policy: .hermes))
+        #expect(WatchKanbanStatus.createDestinations(policy: .hermes) == ["triage", "ready"])
+        #expect(WatchKanbanStatus.createDestinations() == ["triage", "todo", "ready"])
         #expect(WatchKanbanStatus.needsRunningExitConfirmation(from: "running"))
         #expect(!WatchKanbanStatus.needsRunningExitConfirmation(from: "ready"))
         #expect(WatchKanbanStatus.title("todo") == "To Do")
@@ -132,7 +143,18 @@ import Testing
         )
         let decoded = WatchKanbanBoardChrome(wireSummary: chrome.wireSummary)
         #expect(decoded == chrome)
+        #expect(decoded?.resolvedMovePolicy == .webui)
         #expect(WatchKanbanBoardChrome(wireSummary: "{}") == nil)
+        var hermes = chrome
+        hermes.movePolicy = WatchKanbanMovePolicy.hermes.rawValue
+        let hermesDecoded = WatchKanbanBoardChrome(wireSummary: hermes.wireSummary)
+        #expect(hermesDecoded?.resolvedMovePolicy == .hermes)
+        let legacy = #"{"boards":[],"columns":["triage","todo"],"name":"Kanban","slug":"default"}"#
+        let legacyChrome = WatchKanbanBoardChrome(wireSummary: legacy)
+        #expect(legacyChrome?.movePolicy == nil)
+        #expect(legacyChrome?.resolvedMovePolicy == .webui)
+        let unknown = #"{"boards":[],"columns":["triage"],"movePolicy":"later","name":"Kanban","slug":"x"}"#
+        #expect(WatchKanbanBoardChrome(wireSummary: unknown)?.resolvedMovePolicy == .webui)
 
         let plain = WatchGlanceQuery.kanbanRequest(from: WatchGlanceQuery.kanban)
         #expect(plain?.slug == nil)

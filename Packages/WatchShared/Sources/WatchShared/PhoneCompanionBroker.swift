@@ -713,7 +713,8 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
                 name: board.name,
                 slug: board.slug,
                 columns: board.columns,
-                boards: board.boards
+                boards: board.boards,
+                movePolicy: board.movePolicy
             )
             let header = WatchPhoneSkillGlance(name: WatchKanbanBoardChrome.cardID, summary: chrome.wireSummary, enabled: nil)
             let cards = board.cards.map { card in

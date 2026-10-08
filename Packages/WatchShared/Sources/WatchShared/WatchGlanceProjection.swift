@@ -268,6 +268,13 @@ public struct WatchKanbanCard: Hashable, Sendable, Identifiable {
     }
 }
 
+/// Which move rules a board uses. Missing or unknown values stay on webui,
+/// so a glance saved before this field existed still offers today's destinations.
+public enum WatchKanbanMovePolicy: String, Sendable, Equatable {
+    case webui
+    case hermes
+}
+
 /// Board vocabulary and the wrist's move policy, mirroring the iPhone's
 /// `KanbanFeatureState.moveDestinations` and Complete action.
 public enum WatchKanbanStatus {
@@ -278,22 +285,50 @@ public enum WatchKanbanStatus {
         switch status.lowercased() {
         case "triage": return "Triage"
         case "todo": return "To Do"
+        case "scheduled": return "Scheduled"
         case "ready": return "Ready"
         case "running": return "Running"
         case "blocked": return "Blocked"
+        case "review": return "Review"
         case "done": return "Done"
         case "archived": return "Archived"
         default: return status.isEmpty ? "Unknown" : status.capitalized
         }
     }
 
-    /// Ordinary moves plus Done. Running is claimed by the dispatcher and
-    /// Blocked needs a reason, so neither is a wrist destination; archived
-    /// Cards are restored on iPhone.
-    public static func moveDestinations(from status: String) -> [String] {
+    /// Statuses a new Card may start in. A Hermes host only starts in Triage or Ready.
+    public static func createDestinations(policy: WatchKanbanMovePolicy? = nil) -> [String] {
+        switch policy ?? .webui {
+        case .webui: return ["triage", "todo", "ready"]
+        case .hermes: return ["triage", "ready"]
+        }
+    }
+
+    /// Destinations the phone will send. Done is included for Hermes because
+    /// Complete is legal from Review; the watch still hides it from every other column.
+    public static func allowsDestination(_ status: String, policy: WatchKanbanMovePolicy? = nil) -> Bool {
+        switch policy ?? .webui {
+        case .webui: return ["triage", "todo", "ready", "done"].contains(status.lowercased())
+        case .hermes: return ["triage", "ready", "done"].contains(status.lowercased())
+        }
+    }
+
+    /// Ordinary moves plus Done, for the board's server. A Hermes host's ordinary
+    /// destinations are Triage and Ready. To Do, Scheduled, and Review are never
+    /// destinations. Complete is only offered from Review. Running is claimed by
+    /// the dispatcher and Blocked needs a reason, so neither is a wrist destination.
+    /// Archived Cards are restored on iPhone. A nil policy is webui.
+    public static func moveDestinations(from status: String, policy: WatchKanbanMovePolicy? = nil) -> [String] {
         let current = status.lowercased()
         guard current != "archived" else { return [] }
-        return ["triage", "todo", "ready", "done"].filter { $0 != current }
+        switch policy ?? .webui {
+        case .webui:
+            return ["triage", "todo", "ready", "done"].filter { $0 != current }
+        case .hermes:
+            var destinations = ["triage", "ready"].filter { $0 != current }
+            if current == "review" { destinations.append("done") }
+            return destinations
+        }
     }
 
     /// Leaving Running may clear the Card's claim and worker state, so the

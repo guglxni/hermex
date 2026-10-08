@@ -29,6 +29,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         query: String?,
         limit: Int
     ) async throws -> [WatchPhoneSessionRow] {
+        // A Hermes roster is `profiles.list`. `sidebarSessions` would open webui's
+        // `show_cli_sessions` gate on a host that does not have that setting.
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listSessions(
+                urlString: urlString, archived: archived, query: query, limit: limit
+            )
+        }
         let client = try client(for: urlString)
         let summaries: [SessionSummary]
         do {
@@ -55,6 +62,9 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func listProfiles(urlString: String) async throws -> WatchPhoneProfilePage {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listProfiles(urlString: urlString)
+        }
         let response = try await call(urlString) { try await $0.profiles() }
         let profiles = (response.profiles ?? []).compactMap { profile -> WatchPhoneProfileChoice? in
             guard let name = profile.normalizedName else { return nil }
@@ -71,6 +81,10 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func switchProfile(urlString: String, name: String) async throws {
+        if isHermes(urlString) {
+            try await HermesWatchPhoneBackend().switchProfile(urlString: urlString, name: name)
+            return
+        }
         let response = try await call(urlString) { try await $0.switchProfile(name: name) }
         if let error = response.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             throw WatchCompanionError.backend(.invalidResponse)
@@ -81,6 +95,9 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// job's own `state` never says "running". A failed status read leaves
     /// every task not-running rather than failing the glance.
     func listTasks(urlString: String, limit: Int) async throws -> [WatchPhoneTaskGlance] {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listTasks(urlString: urlString, limit: limit)
+        }
         let client = try client(for: urlString)
         // The phone has about 30 seconds to answer the watch. The default
         // request timeout is longer than that, so a quiet cron endpoint used
@@ -136,6 +153,9 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func listTaskRuns(urlString: String, jobID: String, limit: Int) async throws -> [WatchPhoneTaskRun] {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listTaskRuns(urlString: urlString, jobID: jobID, limit: limit)
+        }
         let response = try await call(urlString) {
             try await $0.cronHistory(jobID: jobID, offset: 0, limit: min(max(limit, 1), 20))
         }
@@ -145,28 +165,38 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func taskRunOutput(urlString: String, jobID: String, runID: String) async throws -> String? {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().taskRunOutput(urlString: urlString, jobID: jobID, runID: runID)
+        }
         let response = try await call(urlString) { try await $0.cronRunDetail(jobID: jobID, filename: runID) }
         return Self.trimmed(response.content) ?? Self.trimmed(response.snippet)
     }
 
     func listSkills(urlString: String, query: String?, limit: Int) async throws -> [WatchPhoneSkillGlance] {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listSkills(urlString: urlString, query: query, limit: limit)
+        }
         let response = try await call(urlString) { try await $0.skills() }
+        return Self.skillGlances(from: response.skills ?? [], query: query, limit: limit)
+    }
+
+    static func skillGlances(from skills: [SkillSummary], query: String?, limit: Int) -> [WatchPhoneSkillGlance] {
         let needle = query?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return (response.skills ?? []).compactMap { skill -> WatchPhoneSkillGlance? in
-            guard let name = Self.trimmed(skill.name) else { return nil }
+        return skills.compactMap { skill -> WatchPhoneSkillGlance? in
+            guard let name = trimmed(skill.name) else { return nil }
             if let needle, !needle.isEmpty {
                 let haystack = [name, skill.description, skill.category]
                     .compactMap { $0?.lowercased() }
                     .joined(separator: " ")
                 guard haystack.contains(needle) else { return nil }
             }
-            let summary = Self.trimmed(skill.description)
+            let summary = trimmed(skill.description)
                 .flatMap { WatchTranscriptProjection.clippedMarkdown(WatchTranscriptProjection.wristMarkdown($0), max: 600) }
-                ?? Self.trimmed(skill.category) ?? ""
+                ?? trimmed(skill.category) ?? ""
             let enabled: Bool? = skill.disabled.map { !$0 }
             return WatchPhoneSkillGlance(
-                name: Self.clip(name, maxUTF8: 256),
-                summary: Self.clip(summary, maxUTF8: 4096),
+                name: clip(name, maxUTF8: 256),
+                summary: clip(summary, maxUTF8: 4096),
                 enabled: enabled
             )
         }
@@ -175,6 +205,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func memoryGlance(urlString: String) async throws -> [WatchPhoneMemoryGlance] {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.memoryDocument) }
         let response = try await call(urlString) { try await $0.memory() }
         return Self.memoryGlances(from: response)
     }
@@ -201,6 +232,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func usageGlance(urlString: String, days: Int) async throws -> WatchPhoneUsageGlance {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.insightsAggregate) }
         let window = min(365, max(1, days))
         let response = try await call(urlString) { try await $0.insights(days: window) }
         return Self.usageGlance(from: response, window: window)
@@ -245,6 +277,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func listProjects(urlString: String, limit: Int) async throws -> [WatchPhoneProjectGlance] {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.workspace) }
         let response = try await call(urlString) { try await $0.projects() }
         return (response.projects ?? []).prefix(limit).compactMap { project in
             guard let name = Self.trimmed(project.name) else { return nil }
@@ -254,6 +287,9 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func listKanbanCards(urlString: String, limit: Int) async throws -> [WatchPhoneKanbanCardGlance] {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listKanbanCards(urlString: urlString, limit: limit)
+        }
         let client = try client(for: urlString)
         let boards: KanbanBoardsResponse
         do {
@@ -312,6 +348,15 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         onlyMine: Bool,
         limit: Int
     ) async throws -> WatchPhoneKanbanBoardGlance {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().listKanbanBoard(
+                urlString: urlString,
+                slug: slug,
+                includeArchived: includeArchived,
+                onlyMine: onlyMine,
+                limit: limit
+            )
+        }
         let client = try client(for: urlString)
         let boards = try await Self.kanbanBoards(on: client)
         if let slug, !slug.isEmpty {
@@ -348,7 +393,8 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
             slug: chosen ?? "",
             columns: columns,
             boards: choices,
-            cards: cards
+            cards: cards,
+            movePolicy: WatchKanbanMovePolicy.webui.rawValue
         )
     }
 
@@ -580,6 +626,10 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func controlTask(urlString: String, jobID: String, action: String) async throws {
+        if isHermes(urlString) {
+            try await HermesWatchPhoneBackend().controlTask(urlString: urlString, jobID: jobID, action: action)
+            return
+        }
         let client = try client(for: urlString)
         let response: CronMutationResponse
         switch action {
@@ -598,6 +648,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func setSkillEnabled(urlString: String, name: String, enabled: Bool) async throws {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.skills) }
         let response = try await client(for: urlString).toggleSkill(name: name, enabled: enabled)
         if response.ok == false {
             throw WatchCompanionError.backend(.invalidResponse)
@@ -605,6 +656,12 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func createKanbanCard(urlString: String, boardSlug: String, title: String, status: String) async throws {
+        if isHermes(urlString) {
+            try await HermesWatchPhoneBackend().createKanbanCard(
+                urlString: urlString, boardSlug: boardSlug, title: title, status: status
+            )
+            return
+        }
         let client = try client(for: urlString)
         do {
             let response = try await client.createKanbanCard(KanbanCreateCardRequest(
@@ -629,6 +686,11 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func dispatchKanban(urlString: String, boardSlug: String, dryRun: Bool) async throws -> String {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().dispatchKanban(
+                urlString: urlString, boardSlug: boardSlug, dryRun: dryRun
+            )
+        }
         let client = try client(for: urlString)
         let result: KanbanDispatchResult
         do {
@@ -636,6 +698,10 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         } catch let error as APIError {
             throw WatchCompanionError.backend(Self.authCode(for: error))
         }
+        return Self.dispatchSummary(result, dryRun: dryRun)
+    }
+
+    static func dispatchSummary(_ result: KanbanDispatchResult, dryRun: Bool) -> String {
         let rows: [(String, Int?)] = [
             ("Spawned", result.spawned),
             ("Promoted", result.promoted),
@@ -654,7 +720,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// success means the server's returned Card carries the new status, the
     /// same settlement rule the iPhone Kanban screen uses.
     func moveKanbanCard(urlString: String, cardID: String, status: String, boardSlug: String) async throws {
-        guard WatchKanbanStatus.moveDestinations(from: "").contains(status.lowercased()) else {
+        if isHermes(urlString) {
+            try await HermesWatchPhoneBackend().moveKanbanCard(
+                urlString: urlString, cardID: cardID, status: status, boardSlug: boardSlug
+            )
+            return
+        }
+        guard WatchKanbanStatus.allowsDestination(status.lowercased(), policy: .webui) else {
             throw WatchCompanionError.backend(.invalidResponse)
         }
         let slug = boardSlug.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -682,13 +754,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         }
     }
 
-    private static func trimmed(_ value: String?) -> String? {
+    static func trimmed(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func clip(_ value: String, maxUTF8: Int) -> String {
+    static func clip(_ value: String, maxUTF8: Int) -> String {
         if value.utf8.count <= maxUTF8 { return value }
         var kept = ""
         var used = 0
@@ -702,6 +774,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func createSession(urlString: String, profileID: String?, workspace: String?) async throws -> String {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.createSession) }
         let created = try await client(for: urlString).createSession(
             workspace: workspace,
             model: nil,
@@ -724,6 +797,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         message: String,
         attachments: [WatchChatAttachment]?
     ) async throws -> String {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.send) }
         let payloads = attachments?.map(\.jsonValue)
         let response = try await client(for: urlString).startChat(
             sessionID: sessionID,
@@ -793,6 +867,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         data: Data,
         filename: String
     ) async throws -> WatchChatAttachment {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.send) }
         let response = try await client(for: urlString).uploadFile(
             sessionID: sessionID,
             data: data,
@@ -815,6 +890,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func cancelChat(urlString: String, streamID: String) async throws {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.stop) }
         let response = try await client(for: urlString).cancelChat(streamID: streamID)
         // `ok: false` is a refused cancel. Treating it as success hid Stop
         // while the server kept running. A missing `ok` is still acceptance,
@@ -830,6 +906,11 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         before: Int?,
         limit: Int
     ) async throws -> WatchPhoneTranscriptPage {
+        if isHermes(urlString) {
+            return try await HermesWatchPhoneBackend().transcript(
+                urlString: urlString, sessionID: sessionID, before: before, limit: limit
+            )
+        }
         let detail = try await client(for: urlString).session(
             id: sessionID,
             includeMessages: true,
@@ -849,11 +930,25 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     }
 
     func mediaData(urlString: String, sessionID: String, path: String) async throws -> Data {
-        try await client(for: urlString).mediaData(sessionID: sessionID, path: path)
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.media) }
+        return try await client(for: urlString).mediaData(sessionID: sessionID, path: path)
     }
 
     func transcribeAudio(urlString: String, data: Data, filename: String) async throws -> String {
         let raw = UserDefaults.standard.string(forKey: ComposerSTTProviderPreference.storageKey) ?? ""
+        if isHermes(urlString) {
+            // HermesTranscription is not in this tree. The server closure fails
+            // before any request, so the composer's on-device provider can still run.
+            let speechAuthorized = await WatchVoiceNoteTranscription.speechAlreadyAuthorized()
+            let preference = ComposerSTTProviderPreference.storedValue(raw)
+            return try await WatchVoiceNoteTranscription.transcript(
+                preference: preference,
+                speechAuthorized: speechAuthorized,
+                onDeviceSupported: speechAuthorized,
+                server: { throw WatchCompanionError.backend(.invalidResponse) },
+                onDevice: { try await WatchVoiceNoteTranscription.recognizeOnDevice(data: data) }
+            )
+        }
         let preference = ComposerSTTProviderPreference.storedValue(raw)
         // Status only. Requesting authorization would prompt a locked phone.
         let speechAuthorized = await WatchVoiceNoteTranscription.speechAlreadyAuthorized()
@@ -893,6 +988,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         sessionID: String,
         streamID: String
     ) async throws -> (phase: WatchRunPhase, isTerminal: Bool) {
+        if isHermes(urlString) { throw WatchCompanionError.unsupported(.runState) }
         let client = try client(for: urlString)
         if let status = try? await client.chatStreamStatus(streamID: streamID) {
             let terminal = status.journal?.terminal == true || status.active == false
@@ -902,6 +998,10 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         let status = try await client.sessionStatus(id: sessionID)
         let streaming = status.isStreaming == true || status.activeStreamId == streamID
         return (streaming ? .responding : .completed, !streaming)
+    }
+
+    private func isHermes(_ urlString: String) -> Bool {
+        WatchHermesRoute.kind(of: urlString, accounts: ServerRegistry.shared.servers) == .hermes
     }
 
     private func client(for urlString: String) throws -> APIClient {
@@ -942,7 +1042,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// Desktop transcripts often omit `message_id`. `ChatMessage.id` then folds
     /// the whole body into the identity, which is longer than the watch wire
     /// allows, so one long reply rejected the entire conversation.
-    private static func hint(from message: ChatMessage, ordinal: Int) -> WatchPhoneMessageHint {
+    static func hint(from message: ChatMessage, ordinal: Int) -> WatchPhoneMessageHint {
         let rawRole = message.role?.lowercased()
         let isToolResult = rawRole == "tool"
         let attachments = (message.attachments ?? []).map { attachment in
@@ -975,7 +1075,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         )
     }
 
-    private static func watchMessageID(_ message: ChatMessage, ordinal: Int) -> String {
+    static func watchMessageID(_ message: ChatMessage, ordinal: Int) -> String {
         if let messageID = message.messageId?.trimmingCharacters(in: .whitespacesAndNewlines),
            !messageID.isEmpty {
             return String(messageID.prefix(64))
@@ -984,7 +1084,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         return "m\(ordinal)-\(message.role ?? "msg")-\(stamp)"
     }
 
-    private static func toolHints(from calls: [JSONValue]?) -> [WatchPhoneToolHint] {
+    static func toolHints(from calls: [JSONValue]?) -> [WatchPhoneToolHint] {
         (calls ?? []).compactMap { call in
             guard case .object(let object) = call else { return nil }
             let function = object["function"].flatMap { value -> [String: JSONValue]? in
@@ -1003,13 +1103,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
         }
     }
 
-    private static func isImagePath(_ value: String?) -> Bool {
+    static func isImagePath(_ value: String?) -> Bool {
         guard let value else { return false }
         let ext = URL(fileURLWithPath: value).pathExtension.lowercased()
         return ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tiff", "tif"].contains(ext)
     }
 
-    private static func role(from raw: String?) -> WatchMessageRole {
+    static func role(from raw: String?) -> WatchMessageRole {
         switch raw?.lowercased() {
         case "assistant": return .assistant
         case "system": return .system
@@ -1021,7 +1121,7 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
     /// A 401 (or `.unauthorized`) means the iPhone's session for this server is
     /// gone; the watch must tell the user to sign in on iPhone rather than
     /// present an empty ready surface. Everything else stays a generic failure.
-    private static func authCode(for error: APIError) -> SanitizedDiagnosticCode {
+    static func authCode(for error: APIError) -> SanitizedDiagnosticCode {
         switch error {
         case .unauthorized:
             return .authRequired

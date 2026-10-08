@@ -60,14 +60,14 @@ struct WatchKanbanListView: View {
             }
             ForEach(visibleCards) { card in
                 NavigationLink {
-                    WatchKanbanCardView(model: model, card: card) {
+                    WatchKanbanCardView(model: model, card: card, movePolicy: chrome.resolvedMovePolicy) {
                         await reload()
                     }
                 } label: {
                     cardRow(card)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    if WatchKanbanStatus.moveDestinations(from: card.status).contains("done"),
+                    if WatchKanbanStatus.moveDestinations(from: card.status, policy: chrome.resolvedMovePolicy).contains("done"),
                        !WatchKanbanStatus.needsRunningExitConfirmation(from: card.status) {
                         Button {
                             Task { await move(card, to: "done") }
@@ -79,7 +79,7 @@ struct WatchKanbanListView: View {
                     }
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                    if let next = WatchKanbanStatus.moveDestinations(from: card.status).first(where: { $0 != "done" }),
+                    if let next = WatchKanbanStatus.moveDestinations(from: card.status, policy: chrome.resolvedMovePolicy).first(where: { $0 != "done" }),
                        !WatchKanbanStatus.needsRunningExitConfirmation(from: card.status) {
                         Button {
                             Task { await move(card, to: next) }
@@ -102,7 +102,7 @@ struct WatchKanbanListView: View {
                     await reload()
                 }
             case .create:
-                WatchKanbanCreateCardView(model: model, boardSlug: chrome.slug) { status in
+                WatchKanbanCreateCardView(model: model, boardSlug: chrome.slug, movePolicy: chrome.resolvedMovePolicy) { status in
                     selectedStatus = status
                     await reload()
                 }
@@ -383,13 +383,14 @@ private struct WatchKanbanCreateCardView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var model: WatchRootModel
     let boardSlug: String
+    var movePolicy: WatchKanbanMovePolicy = .webui
     let onCreate: (String) async -> Void
     @State private var title = ""
     @State private var status = "triage"
     @State private var saving = false
     @State private var actionError: String?
 
-    private let statuses = ["triage", "todo", "ready"]
+    private var statuses: [String] { WatchKanbanStatus.createDestinations(policy: movePolicy) }
 
     var body: some View {
         List {
@@ -523,9 +524,11 @@ enum WatchKanbanPresentation {
         switch status {
         case "triage": return .gray
         case "todo": return .blue
+        case "scheduled": return .indigo
         case "ready": return .mint
         case "running": return .orange
         case "blocked": return .red
+        case "review": return .yellow
         case "done": return .green
         case "archived": return .secondary
         default: return .purple
@@ -558,15 +561,23 @@ enum WatchKanbanPresentation {
 // MARK: - Card detail
 
 struct WatchKanbanCardView: View {
+    @Environment(\.dismiss) private var dismiss
     @Bindable var model: WatchRootModel
+    var movePolicy: WatchKanbanMovePolicy = .webui
     let onChange: () async -> Void
     @State private var card: WatchKanbanCard
     @State private var moving: String?
     @State private var actionError: String?
     @State private var pendingRunningExit: String?
 
-    init(model: WatchRootModel, card: WatchKanbanCard, onChange: @escaping () async -> Void) {
+    init(
+        model: WatchRootModel,
+        card: WatchKanbanCard,
+        movePolicy: WatchKanbanMovePolicy = .webui,
+        onChange: @escaping () async -> Void
+    ) {
         self.model = model
+        self.movePolicy = movePolicy
         self.onChange = onChange
         _card = State(initialValue: card)
     }
@@ -589,7 +600,7 @@ struct WatchKanbanCardView: View {
             // The action this screen exists for comes before the reference
             // detail. Destinations share one row-pair so a 40mm watch shows
             // every move without a scroll.
-            let destinations = WatchKanbanStatus.moveDestinations(from: card.status)
+            let destinations = WatchKanbanStatus.moveDestinations(from: card.status, policy: movePolicy)
             if !destinations.isEmpty {
                 Section {
                     if let actionError {
@@ -715,7 +726,13 @@ struct WatchKanbanCardView: View {
             return
         }
         WatchHaptics.play(.success)
-        card = card.withStatus(status)
         await onChange()
+        // A Hermes host can land a Ready request in To Do or Review. The list
+        // reload is the status that actually stuck, so leave this card.
+        if movePolicy == .hermes {
+            dismiss()
+        } else {
+            card = card.withStatus(status)
+        }
     }
 }

@@ -307,6 +307,108 @@ final class WatchVoiceNoteTranscriptionTests: XCTestCase {
     }
 }
 
+final class WatchHermesRouteTests: XCTestCase {
+    func testHermesKindComesFromTheRegistryAndDoesNotRevealWebuiSessions() {
+        let hermes = account("https://hermes.example/", kind: .hermes)
+        let webui = account("https://webui.example", kind: .webui)
+        XCTAssertEqual(
+            WatchHermesRoute.kind(of: "https://hermes.example", accounts: [hermes, webui]),
+            .hermes
+        )
+        XCTAssertEqual(WatchHermesRoute.kind(of: "https://unknown.example", accounts: [hermes]), .webui)
+        XCTAssertFalse(WatchHermesRoute.revealsWebuiCLISessions(.hermes))
+        XCTAssertTrue(WatchHermesRoute.revealsWebuiCLISessions(.webui))
+        XCTAssertFalse(WatchHermesRoute.awaitsRunNowTrigger(.hermes))
+        XCTAssertTrue(WatchHermesRoute.awaitsRunNowTrigger(.webui))
+        XCTAssertFalse(WatchHermesRoute.togglesSkills(on: .hermes))
+        XCTAssertTrue(WatchHermesRoute.remembersProfileLocally(.hermes))
+        XCTAssertFalse(WatchHermesRoute.remembersProfileLocally(.webui))
+    }
+
+    func testHermesProfileSwitchIsRememberedLocally() throws {
+        let defaults = UserDefaults(suiteName: "watch-hermes-profile")!
+        defaults.removePersistentDomain(forName: "watch-hermes-profile")
+        let server = try XCTUnwrap(URL(string: "https://hermes.example"))
+        try WatchHermesRoute.rememberProfile("ops", server: server, listed: ["default", "ops"], defaults: defaults)
+        XCTAssertEqual(
+            WatchHermesRoute.rememberedProfile(server: server, listed: ["default", "ops"], current: "default", defaults: defaults),
+            "ops"
+        )
+        XCTAssertThrowsError(
+            try WatchHermesRoute.rememberProfile("missing", server: server, listed: ["ops"], defaults: defaults)
+        )
+    }
+
+    func testHermesSessionRowsStayOnTheSelectedProfileAndSkipHiddenChats() throws {
+        let ops = try profile(#"""
+        {"name":"ops","canonical_session":{"id":"sess-ops","preview":"ship it","last_active":1700000000},
+         "ui_meta":{"hermes-bots":{"title":"Ops","pinned":false}}}
+        """#)
+        let hidden = try profile(#"""
+        {"name":"old","canonical_session":{"id":"sess-old","last_active":1700000001},
+         "ui_meta":{"hermes-bots":{"hidden":true,"title":"Old"}}}
+        """#)
+        let rows = WatchHermesRoute.sessionRows(
+            from: [hidden, ops], live: ["ops": .working], selectedProfile: "ops",
+            archived: false, query: nil, limit: 10
+        )
+        XCTAssertEqual(rows.map(\.sessionID), ["sess-ops"])
+        XCTAssertEqual(rows.first?.runState, .responding)
+        XCTAssertEqual(rows.first?.title, "Ops")
+        let archived = WatchHermesRoute.sessionRows(
+            from: [hidden, ops], live: [:], selectedProfile: "ops", archived: true, query: "old", limit: 10
+        )
+        XCTAssertEqual(archived.map(\.sessionID), ["sess-old"])
+    }
+
+    func testHermesRunningStateAndKanbanMovesFollowTheHost() throws {
+        let job = try self.decode(CronJob.self, #"""
+        {"id":"job-1","name":"Digest","state":"scheduled","enabled":true,"profile":"ops","fire_claim":{"at":1700000000}}
+        """#)
+        let running = WatchHermesRoute.runningJobIDs(CronJobList(hermesJobs: [job]))
+        XCTAssertTrue(running.contains("job-1"))
+        XCTAssertFalse(WatchHermesRoute.kanbanMoveSucceeded(requested: "todo", landed: "todo", backend: .hermes))
+        XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "ready", landed: "todo", backend: .hermes))
+        XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "done", landed: "done", backend: .hermes))
+        XCTAssertTrue(WatchHermesRoute.kanbanMoveSucceeded(requested: "todo", landed: "todo", backend: .webui))
+        let snapshot = KanbanBoardSnapshot(
+            columns: [KanbanColumn(name: "Review", cards: nil), KanbanColumn(name: "scheduled", cards: nil)],
+            tenants: nil, assignees: nil, filters: nil, changed: nil, latestEventID: nil, readOnly: false
+        )
+        XCTAssertEqual(
+            WatchHermesRoute.columns(in: snapshot, cards: [], includeArchived: false),
+            ["review", "scheduled"]
+        )
+    }
+
+    func testHermesTranscriptPageUsesTheLatestMessages() throws {
+        let data = Data(#"{"messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"}]}"#.utf8)
+        let page = try WatchHermesRoute.transcriptPage(from: data, limit: 1)
+        XCTAssertEqual(page.blocks.count, 1)
+        XCTAssertTrue(page.isTruncated)
+        XCTAssertNil(page.nextBefore)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(type, from: Data(json.utf8))
+    }
+
+    private func account(_ url: String, kind: ServerKind) -> ServerAccount {
+        ServerAccount(
+            id: url, urlString: url, displayName: "Server", initials: "S",
+            headerLogoColorHex: HeaderLogoColor.defaultHex,
+            createdAt: .distantPast, updatedAt: .distantPast, kind: kind
+        )
+    }
+
+    private func profile(_ json: String) throws -> BotProfile {
+        let row = try JSONDecoder().decode(BotJSON.self, from: Data(json.utf8))
+        return try XCTUnwrap(BotProfile(row))
+    }
+}
+
 final class WatchChatCancelAcceptanceTests: XCTestCase {
     func testExplicitRefusalIsNotASuccessfulStop() {
         XCTAssertFalse(WatchChatCancelAcceptance.isAccepted(ChatCancelResponse(ok: false, cancelled: false, streamId: "s", error: "busy")))
