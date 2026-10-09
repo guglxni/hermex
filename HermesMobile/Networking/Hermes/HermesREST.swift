@@ -28,8 +28,58 @@ import Foundation
 /// `limit` is clamped to 1-100, there is no offset, and a job without runs answers `{runs: []}`.
 /// The Kanban plugin's reads (#1043), its event socket (#1045) and its writes (#1044) are under
 /// `/api/plugins/kanban` at the same pin, checked against `scripts/local-hermes`;
-/// `docs/agents/kanban.md` § Hermes has their shapes.
+/// `docs/agents/kanban.md` § Hermes has their shapes. The skills routes (#1069) are read at the
+/// same pin and checked against `scripts/local-hermes`: the list is a bare array with `enabled`,
+/// the toggle is PUT, not webui's POST, and a refusal or a missing skill is `{detail}`. The file
+/// routes a skill's linked files use (#1070) are read at the same pin and checked against
+/// `scripts/local-hermes`: a listing answers `{entries: [{name, path, isDirectory}]}`, or 200
+/// `{entries: [], error}` for a folder it can't read, and each entry's `path` is resolved
+/// (`/private/var/…` for `/var/…` on a Mac), so it never matches the path that was asked for.
+/// The file, config and soul routes the Memory screen uses (#1073) are read at the same pin and
+/// checked against `scripts/local-hermes`: a missing file reads 404 `{detail: "File not found"}`,
+/// a write to a missing folder is 400 "Parent directory does not exist", and `files/mkdir`
+/// answers the folder's entry.
+/// The update routes (#1075) are read at the same pin and checked against `scripts/local-hermes`;
+/// `docs/agents/bots.md` § Updating Hermes has their shapes. `POST /api/audio/speak` (#1072) is
+/// read at the same pin and checked against `scripts/local-hermes`: `{text}` only, spoken by the
+/// Profile's `tts.provider`, answered `{ok, data_url, mime_type, provider}`, or `{detail}`.
+/// The analytics routes (#1074) are read at the same pin, recorded from `scripts/local-hermes`
+/// (`Fixtures/HermesAgent/analytics.json`) and checked read-only against a live host: `days`
+/// outside 1-365 is a 422, an unknown Profile a 404 `{detail}`, a store the host can't read a
+/// 503 whose `detail` is `{error: "state_db_…", message, path}`, and a sum over an empty window
+/// is null.
+/// Dictation's `POST /api/audio/transcribe` (#1071) is read at the same pin and checked against
+/// `scripts/local-hermes`: JSON, not multipart; `{ok, transcript, provider}`, with silence an
+/// empty transcript; and `{detail}` for a refusal or a provider failure (400), an unknown
+/// Profile (404) or an unexpected failure (500).
+/// The Sessions list's page and read mark (#1046) are read at the same pin, checked against
+/// `scripts/local-hermes` and the shape of a read-only `GET /api/sessions` on a 0.21.5 host;
+/// `docs/agents/bots.md` § Sessions list on Hermes has the recipe.
+/// A session's transcript pages (#1047) are read at the same pin, checked against a compacted
+/// session on `scripts/local-hermes` and the shape of a read-only page from a 0.21.5 host:
+/// `{session_id, profile, messages, pagination: {limit, offset, order, returned}}`, each page
+/// oldest first, with no total, so a short page is the start.
+/// The row actions (#1048) are read at the same pin and checked against `scripts/local-hermes`: a
+/// PATCH answers `{ok, title, <flag>}`, a refused title (in use, over 100 characters, the canonical
+/// Bot Chat) is 400 `{detail}`, an archived list back-fills non-archived pinned rows, and the
+/// export is the session row with its `messages`, without a `Content-Disposition`.
+/// The search (#1053) is read at the same pin and checked against `scripts/local-hermes`:
+/// `{results: [...]}`, an empty `q` answers none, and a Profile the host lacks is 404 `{detail}`;
+/// `HermesSessionSearch` has the result's fields.
+/// A session's own row and the session import (#1051) are read at the same pin and checked against
+/// `scripts/local-hermes`: the row is the stored one, flags as 0/1, `model_config` a JSON string
+/// (`{"_branched_from": <parent>}` on a branch), and system prompt and tool names included, about
+/// 60 KB; an import answers `{ok, imported, skipped, detached, imported_ids, skipped_ids, errors}`,
+/// skips an id the Profile has, refuses a payload with 400 `{detail: {errors}}` before writing
+/// anything, and answers 413 past 25 MB.
 enum HermesREST: Equatable, Sendable {
+    /// The most rows `GET /api/sessions` lists in one page.
+    static let sessionPageSize = 100
+    /// The most display rows one transcript page (`sessionMessages` with an offset) carries.
+    static let transcriptPageSize = 100
+    /// The most sessions one search answers; the host allows up to 100 and defaults to 20.
+    static let sessionSearchLimit = 50
+
     /// Public, so it reads the host before any credential is sent.
     case status
     case login(username: String, password: String)
@@ -44,6 +94,9 @@ enum HermesREST: Equatable, Sendable {
     case deleteProfile(name: String)
     /// Stores image bytes under the Profile. The returned path travels in one prompt.
     case uploadImage(profile: String, filename: String, dataURL: String)
+    /// One recording for `profile`'s speech-to-text: `dataURL` is base64 of up to 25 MiB of
+    /// audio, and `mimeType` an `audio/*` type.
+    case transcribe(profile: String, dataURL: String, mimeType: String)
     /// One session-scoped file download. `path` is checked against the address.
     case downloadArtifact(path: String, profile: String, sessionID: String)
     /// Writes one managed environment value at the host root.
@@ -57,9 +110,30 @@ enum HermesREST: Equatable, Sendable {
     case restartDashboard
     /// Every agent plugin with its on-disk version.
     case pluginsHub
-    /// A stored session's latest rows under `profile`: a background task's `bg_<id>` side
-    /// session, whose last reply is its durable result (#1013).
-    case sessionMessages(key: String, profile: String)
+    /// A stored session's rows under `profile`. Without an offset, its latest 500: a background
+    /// task's `bg_<id>` side session, whose last reply is its durable result (#1013). With one,
+    /// a transcript page (#1047): `transcriptPageSize` display rows counted back from the newest,
+    /// compacted ones included, in chronological order.
+    case sessionMessages(key: String, profile: String, offset: Int? = nil)
+    /// One page of `profile`'s sessions for the Sessions list (#1046): latest activity first,
+    /// without archived, empty or machine-run rows, `sessionPageSize` at a time from `offset`.
+    /// Each page also brings every pinned row it missed, archived ones included. `archived`
+    /// reads the Archived screen's page instead (#1048): only archived rows, hidden Bot Chats
+    /// included, plus the same pinned back-fill.
+    case sessionList(profile: String, offset: Int, archived: Bool = false)
+    /// One change to a session, with `profile` in the body (#1046, #1048).
+    case updateSession(key: String, profile: String, change: HermesSessionChange)
+    /// That exact session's row and every message, unredacted, as one JSON object (#1048).
+    case sessionExport(key: String, profile: String)
+    /// That exact session's stored row (#1051), or 404 `{detail}` when `profile` has none.
+    case sessionRow(key: String, profile: String)
+    /// Imports sessions as an export holds them (#1051), each under the id it carries. `body` is
+    /// the JSON `{sessions, profile}`, encoded by the caller off the main actor: it carries every
+    /// message.
+    case importSessions(body: Data)
+    /// `profile`'s sessions matching `query` (#1053): id matches, then message-content matches,
+    /// at most `sessionSearchLimit`, archived and hidden ones included, without machine-run rows.
+    case sessionSearch(query: String, profile: String)
     /// Every Profile's scheduled Tasks, paused and completed included: a bare array.
     case cronJobs
     /// Creates a Task in `profile`, or in the host's default Profile when nil.
@@ -78,8 +152,38 @@ enum HermesREST: Equatable, Sendable {
     case cronRuns(id: String, profile: String?, limit: Int)
     /// `{targets: [{id, name, …}]}`, `local` first, for one Profile's gateway platforms.
     case cronDeliveryTargets(profile: String?)
-    /// One Profile's skills: a bare array of `{name, description, category, enabled, …}`.
+    /// One Profile's skills, disabled ones included: a bare array of `{name, description,
+    /// category, enabled, …}`.
     case skills(profile: String?)
+    /// Turns one skill on or off for `profile`, which goes in the body, where the host reads
+    /// it before the query; `{ok, name, enabled}`.
+    case setSkill(name: String, enabled: Bool, profile: String?)
+    /// A skill's SKILL.md: `{name, content, path}`, where `path` is a host path, or 404 `{detail}`.
+    case skillContent(name: String, profile: String?)
+    /// `{entries: [{name, path, isDirectory}]}` for one folder at a host path, not recursive, with
+    /// build, VCS and credential entries hidden; 200 `{entries: [], error}` when it can't be read.
+    case fsList(path: String)
+    /// `{text, binary, truncated, byteSize, …}` for the file at a host path, its first 512 KiB
+    /// (`truncated` past that); 404 `{detail}` when there is none.
+    case fsReadText(path: String)
+    /// Replaces or creates the file at a host path, atomically; `{ok, path, byteSize}`. It never
+    /// creates folders: a missing parent is 400 "Parent directory does not exist".
+    case fsWriteText(path: String, content: String)
+    /// Creates the folder at a host path, with its parents; 409 when a file is in the way.
+    case filesMkdir(path: String)
+    /// A Profile's whole config, unredacted, credentials included: decode only what is needed.
+    case config(profile: String)
+    /// `{content, exists}`: the Profile's SOUL.md, empty when it has none.
+    case profileSoul(name: String)
+    /// Replaces the Profile's SOUL.md, atomically; `{ok: true}`.
+    case setProfileSoul(name: String, content: String)
+    /// Speaks `text` in `profile`'s voice: the audio as a base64 data URL (`BotClient.speech`).
+    case speak(text: String, profile: String)
+    /// One Profile's usage over the last `days` (1-365): `{daily, totals, by_model, period_days, …}`,
+    /// `daily` holding only days with sessions, by UTC date.
+    case analyticsUsage(days: Int, profile: String)
+    /// The same window by model and billing provider: `{models, totals, period_days}`.
+    case analyticsModels(days: Int, profile: String)
     /// `{default_tenant, …}`, or 404 when the Kanban plugin is disabled or absent.
     case kanbanConfig
     /// Every Board with its counts, and `current`.
@@ -113,10 +217,39 @@ enum HermesREST: Equatable, Sendable {
     case kanbanArchiveBoard(slug: String)
     /// Makes the Board the host's active one, for every client; `{current}`.
     case kanbanSwitchBoard(slug: String)
+    /// Whether the host's install is behind. The host caches the answer for 24 hours; `force`
+    /// asks it to look again.
+    case updateCheck(force: Bool)
+    /// Starts `hermes update` on the host, without a body. It answers once the update has
+    /// started, before it restarts the dashboard.
+    case updateApply
+    /// The update action: whether it runs, its exit code, the tail of its log and the
+    /// summary of the host's latest update receipt.
+    case updateStatus
+    /// The host's latest update receipt, or 404 when no update has run.
+    case updateReceipt
+    /// Public process liveness with the running release, read while the dashboard restarts.
+    case health
 
     func request(base: URL) throws -> URLRequest {
         switch self {
         case .status: return Self.get(base.appendingPathComponent("api/status"))
+        case .health: return Self.get(base.appendingPathComponent("api/health"))
+        case .updateCheck(let force):
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/hermes/update/check"),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            if force { parts.queryItems = [URLQueryItem(name: "force", value: "true")] }
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .updateApply: return Self.bare("POST", base.appendingPathComponent("api/hermes/update"))
+        case .updateStatus:
+            // The log tail is only read for the summary of a run that stopped, so 40 lines will do.
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/actions/hermes-update/status"),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "lines", value: "40")]
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .updateReceipt: return Self.get(base.appendingPathComponent("api/hermes/update/receipt"))
         case .login(let username, let password):
             return try Self.send("POST", base.appendingPathComponent("auth/password-login"), [
                 "provider": .string("basic"), "username": .string(username), "password": .string(password)
@@ -134,6 +267,9 @@ enum HermesREST: Equatable, Sendable {
             parts.queryItems = [URLQueryItem(name: "profile", value: profile)]
             guard let url = parts.url else { throw BotFailure.invalidAddress }
             return try Self.send("POST", url, ["filename": .string(filename), "data_url": .string(dataURL)])
+        case .transcribe(let profile, let dataURL, let mimeType):
+            return try Self.send("POST", try Self.url(base, "api/audio/transcribe", profile: profile),
+                                 ["data_url": .string(dataURL), "mime_type": .string(mimeType)])
         case .downloadArtifact(let path, let profile, let sessionID):
             guard !profile.isEmpty, !sessionID.isEmpty else { throw BotArtifactFailure.invalidReference }
             let path = try BotArtifactReference.path(path, address: base)
@@ -159,9 +295,67 @@ enum HermesREST: Equatable, Sendable {
         case .pushPairing: return Self.get(base.appendingPathComponent("api/plugins/hermex-push/pairing"))
         case .restartDashboard: return try Self.send("POST", base.appendingPathComponent("api/plugins/hermex-push/restart"), [:])
         case .pluginsHub: return Self.get(base.appendingPathComponent("api/dashboard/plugins/hub"))
-        case .sessionMessages(let key, let profile):
+        case .sessionMessages(let key, let profile, let offset):
+            guard Self.isSegment(key), !profile.isEmpty, (offset ?? 0) >= 0,
+                  var parts = URLComponents(url: try Self.url(base, "api/sessions/\(key)/messages", profile: profile),
+                                            resolvingAgainstBaseURL: false)
+            else { throw BotFailure.invalidAddress }
+            // Both `order` and `limit`: a limit alone pages from the oldest row. Without
+            // `include_compacted` the transcript would end at the last compaction.
+            if let offset {
+                parts.queryItems = (parts.queryItems ?? []) + [
+                    URLQueryItem(name: "order", value: "latest"),
+                    URLQueryItem(name: "limit", value: String(Self.transcriptPageSize)),
+                    URLQueryItem(name: "offset", value: String(offset)),
+                    URLQueryItem(name: "include_compacted", value: "true")
+                ]
+            }
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .sessionList(let profile, let offset, let archived):
+            guard !profile.isEmpty, offset >= 0,
+                  var parts = URLComponents(url: base.appendingPathComponent("api/sessions"), resolvingAgainstBaseURL: false)
+            else { throw BotFailure.invalidAddress }
+            // Every value is sent: the host's defaults order by creation, list empty sessions
+            // and keep cron, Kanban, one-shot, subagent and tool runs.
+            parts.queryItems = [
+                URLQueryItem(name: "profile", value: profile), URLQueryItem(name: "order", value: "recent"),
+                URLQueryItem(name: "archived", value: archived ? "only" : "exclude"),
+                URLQueryItem(name: "limit", value: String(Self.sessionPageSize)), URLQueryItem(name: "offset", value: String(offset))
+            ] + (archived ? [] : [URLQueryItem(name: "min_messages", value: "1")]) + [
+                URLQueryItem(name: "exclude_sources", value: "cron,kanban,oneshot,subagent,tool")
+            ]
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .updateSession(let key, let profile, let change):
             guard Self.isSegment(key), !profile.isEmpty else { throw BotFailure.invalidAddress }
-            return Self.get(try Self.url(base, "api/sessions/\(key)/messages", profile: profile))
+            return try Self.send("PATCH", base.appendingPathComponent("api/sessions").appendingPathComponent(key),
+                                 [change.field: change.value, "profile": .string(profile)])
+        case .sessionExport(let key, let profile):
+            guard Self.isSegment(key), !profile.isEmpty else { throw BotFailure.invalidAddress }
+            return Self.get(try Self.url(base, "api/sessions/\(key)/export", profile: profile))
+        case .sessionRow(let key, let profile):
+            guard Self.isSegment(key), !profile.isEmpty else { throw BotFailure.invalidAddress }
+            return Self.get(try Self.url(base, "api/sessions/\(key)", profile: profile))
+        case .importSessions(let body):
+            var request = Self.bare("POST", base.appendingPathComponent("api/sessions/import"))
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            return request
+        case .sessionSearch(let query, let profile):
+            guard !query.isEmpty, !profile.isEmpty,
+                  var parts = URLComponents(url: base.appendingPathComponent("api/sessions/search"), resolvingAgainstBaseURL: false)
+            else { throw BotFailure.invalidAddress }
+            // The same sources the list leaves out, so a search never finds a row it never shows.
+            parts.queryItems = [
+                URLQueryItem(name: "q", value: query), URLQueryItem(name: "profile", value: profile),
+                URLQueryItem(name: "limit", value: String(Self.sessionSearchLimit)),
+                URLQueryItem(name: "exclude_sources", value: "cron,kanban,oneshot,subagent,tool")
+            ]
+            // The host reads a bare `+` as a space, so a typed one ("c++") is escaped.
+            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
         case .cronJobs: return Self.get(base.appendingPathComponent("api/cron/jobs"))
         case .cronCreate(let profile, let fields):
             return try Self.send("POST", try Self.url(base, "api/cron/jobs", profile: profile), fields)
@@ -183,6 +377,51 @@ enum HermesREST: Equatable, Sendable {
         case .cronDeliveryTargets(let profile):
             return Self.get(try Self.url(base, "api/cron/delivery-targets", profile: profile))
         case .skills(let profile): return Self.get(try Self.url(base, "api/skills", profile: profile))
+        case .setSkill(let name, let enabled, let profile):
+            var body: [String: BotJSON] = ["name": .string(name), "enabled": .bool(enabled)]
+            if let profile, !profile.isEmpty { body["profile"] = .string(profile) }
+            return try Self.send("PUT", base.appendingPathComponent("api/skills/toggle"), body)
+        case .skillContent(let name, let profile):
+            guard var parts = URLComponents(url: try Self.url(base, "api/skills/content", profile: profile),
+                                            resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "name", value: name)] + (parts.queryItems ?? [])
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .fsList(let path):
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/fs/list"), resolvingAgainstBaseURL: false)
+            else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "path", value: path)]
+            // The host reads a query's `+` as a space; a path keeps its own.
+            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .fsReadText(let path):
+            guard var parts = URLComponents(url: base.appendingPathComponent("api/fs/read-text"), resolvingAgainstBaseURL: false)
+            else { throw BotFailure.invalidAddress }
+            parts.queryItems = [URLQueryItem(name: "path", value: path)]
+            // The host reads a query's `+` as a space; a path keeps its own.
+            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            guard let url = parts.url else { throw BotFailure.invalidAddress }
+            return Self.get(url)
+        case .fsWriteText(let path, let content):
+            return try Self.send("POST", base.appendingPathComponent("api/fs/write-text"),
+                                 ["path": .string(path), "content": .string(content)])
+        case .filesMkdir(let path):
+            return try Self.send("POST", base.appendingPathComponent("api/files/mkdir"), ["path": .string(path)])
+        case .config(let profile):
+            guard !profile.isEmpty else { throw BotFailure.invalidAddress }
+            return Self.get(try Self.url(base, "api/config", profile: profile))
+        case .profileSoul(let name):
+            guard Self.isSegment(name) else { throw BotFailure.invalidAddress }
+            return Self.get(base.appendingPathComponent("api/profiles/\(name)/soul"))
+        case .setProfileSoul(let name, let content):
+            guard Self.isSegment(name) else { throw BotFailure.invalidAddress }
+            return try Self.send("PUT", base.appendingPathComponent("api/profiles/\(name)/soul"), ["content": .string(content)])
+        case .speak(let text, let profile):
+            guard !profile.isEmpty else { throw BotFailure.invalidAddress }
+            return try Self.send("POST", try Self.url(base, "api/audio/speak", profile: profile), ["text": .string(text)])
+        case .analyticsUsage(let days, let profile): return try Self.analytics(base, "usage", days: days, profile: profile)
+        case .analyticsModels(let days, let profile): return try Self.analytics(base, "models", days: days, profile: profile)
         case .kanbanConfig: return try Self.kanban(base, ["config"])
         case .kanbanBoards: return try Self.kanban(base, ["boards"])
         case .kanbanBoard(let board, let tenant, let includeArchived):
@@ -239,6 +478,16 @@ enum HermesREST: Equatable, Sendable {
             guard Self.isSegment(slug) else { throw BotFailure.invalidAddress }
             return try Self.kanban(base, ["boards", slug, "switch"], [], "POST", [:])
         }
+    }
+
+    /// One analytics read for `profile` over the last `days`, a window the host accepts.
+    private static func analytics(_ base: URL, _ route: String, days: Int, profile: String) throws -> URLRequest {
+        guard (1...365).contains(days), !profile.isEmpty,
+              var parts = URLComponents(url: base.appendingPathComponent("api/analytics").appendingPathComponent(route),
+                                        resolvingAgainstBaseURL: false) else { throw BotFailure.invalidAddress }
+        parts.queryItems = [URLQueryItem(name: "days", value: String(days)), URLQueryItem(name: "profile", value: profile)]
+        guard let url = parts.url else { throw BotFailure.invalidAddress }
+        return get(url)
     }
 
     /// A request under the Kanban plugin's mount: a GET, or `method` with the JSON `body`.
@@ -315,5 +564,32 @@ enum HermesREST: Equatable, Sendable {
         request.httpBody = try JSONEncoder().encode(BotJSON.object(body))
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
+    }
+}
+
+/// One change `HermesREST.updateSession` writes (#1046, #1048). `pinned` and `archived` apply
+/// across the session's compression lineage, and `pinned: true` also unhides it; `title` names
+/// that exact session, cleaned by the host, and the host refuses one already in use.
+enum HermesSessionChange: Equatable, Sendable {
+    /// `false` reads the session up to now for every client; `true` marks it unread.
+    case unread(Bool)
+    case pinned(Bool)
+    case archived(Bool)
+    case title(String)
+
+    fileprivate var field: String {
+        switch self {
+        case .unread: return "unread"
+        case .pinned: return "pinned"
+        case .archived: return "archived"
+        case .title: return "title"
+        }
+    }
+
+    fileprivate var value: BotJSON {
+        switch self {
+        case .unread(let flag), .pinned(let flag), .archived(let flag): return .bool(flag)
+        case .title(let title): return .string(title)
+        }
     }
 }

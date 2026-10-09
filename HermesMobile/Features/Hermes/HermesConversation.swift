@@ -12,12 +12,14 @@ enum ConversationTarget: Hashable, Sendable {
     /// A stored session by its stored key. No title lookup.
     case session(profile: String, key: String)
     /// A session `session.create` makes on the first attach. It becomes `.session` once the
-    /// host names its stored key, so a reattach resumes it instead of creating another.
-    case new(profile: String)
+    /// host names its stored key, so a reattach resumes it instead of creating another. A chat
+    /// `/clear` opens (#1050) starts in its old chat's working folder `cwd` and on its `model`;
+    /// any other starts on the Profile's defaults.
+    case new(profile: String, cwd: String? = nil, model: HermesCall.Model? = nil)
 
     var profile: String {
         switch self {
-        case .canonicalChat(let profile), .session(let profile, _), .new(let profile): return profile
+        case .canonicalChat(let profile), .session(let profile, _), .new(let profile, _, _): return profile
         }
     }
 
@@ -28,7 +30,7 @@ enum ConversationTarget: Hashable, Sendable {
         case .canonicalChat(let profile): return .bot(server: server, connectionID: connectionID, profile: profile)
         case .session(let profile, let key):
             return .hermesSession(server: server, connectionID: connectionID, profile: profile, key: key)
-        case .new(let profile): return .hermesSession(server: server, connectionID: connectionID, profile: profile, key: nil)
+        case .new(let profile, _, _): return .hermesSession(server: server, connectionID: connectionID, profile: profile, key: nil)
         }
     }
 
@@ -89,7 +91,11 @@ enum HermesRequestAnswer: Equatable {
     /// The `session.events.since` reply and the events after the cursor, in order. When
     /// `replayWasReset` some were lost: rebuild from the snapshot that follows.
     func conversationDidReplay(_ reply: BotJSON, frames: [BotJSON])
-    /// The attach's one full `session.resume`, transcript included.
+    /// Whether the attach's last `session.resume` carries the transcript. A Hermes session's
+    /// chat reads its settled history from REST pages instead (#1047), so it asks without.
+    var readsSnapshotHistory: Bool { get }
+    /// The attach's last `session.resume`: live state, and the transcript when
+    /// `readsSnapshotHistory`. The owner may read more before the frames held meanwhile go out.
     func conversationDidReadSnapshot(_ snapshot: BotJSON, runtime: String, attempt: Int) async throws
     /// Connected, with the frames held while attaching applied.
     func conversationDidConnect(runtime: String, attempt: Int) async throws
@@ -114,6 +120,7 @@ enum HermesRequestAnswer: Equatable {
 }
 
 extension HermesConversationOwner {
+    var readsSnapshotHistory: Bool { true }
     func conversationWillAttach(_ attempt: Int) async throws {}
     func conversationDidIdentify(root: String) {}
     func conversationWillReplay(newRuntime: Bool) {}
@@ -129,9 +136,10 @@ extension HermesConversationOwner {
 ///
 /// An attach reads, in order: the session's identity (`session.list` for a Bot Chat;
 /// `session.create` once for a new session), an identity `session.resume` with
-/// `omit_messages`, `session.events.since` from the last `seq`, then one full
-/// `session.resume`. Frames that land meanwhile are held (#901) and handed over once the
-/// owner has the snapshot. A drop reconnects on a backoff while the screen is active.
+/// `omit_messages`, `session.events.since` from the last `seq`, then one more
+/// `session.resume`, with the transcript when the owner reads it from there. Frames that
+/// land meanwhile are held (#901) and handed over once the owner has the snapshot. A drop
+/// reconnects on a backoff while the screen is active.
 /// Recovery only reads; a prompt, answer, stop or setting goes out through `write`, once,
 /// from a deliberate action, and is never resent.
 ///
@@ -163,7 +171,7 @@ extension HermesConversationOwner {
     /// Set when that seeded root is not the bot's canonical chat any more.
     private(set) var linkedRootIsStale = false
     /// The stored key `session.resume` attaches: the Bot Chat's compression tip, or the
-    /// key the host resolved for a session.
+    /// key the host resolved for a session, until a compaction moves it (`adoptStoredKey`).
     private(set) var storedKey: String?
     private(set) var runtime: String?
     private(set) var sequence = 0
@@ -215,6 +223,19 @@ extension HermesConversationOwner {
         reconnectTask?.cancel(); reconnectTask = nil
         resumeRefusedSince = nil; reconnectRetries = 0
         reset()
+    }
+
+    /// The host moved this session to the stored key `key` (#1050): a compaction on a host set
+    /// to legacy rotation (`compression.in_place: false`), by `/compress` or mid-turn, which
+    /// `session.info`'s `stored_session_id` reports. Later reads and writes use it; `root`, the
+    /// draft's and the list's identity, stays, and the next attach resumes from the target's
+    /// key, which the host follows to the same tip. Only while connected, since a replayed
+    /// frame can carry the key from before the move. A Bot Chat keeps its own tip rule
+    /// (`identify`).
+    func adoptStoredKey(_ key: String?) {
+        guard let key, !key.isEmpty, key != storedKey, connectionState == .connected else { return }
+        if case .canonicalChat = target { return }
+        storedKey = key
     }
 
     /// Throws `.stale` once a newer attach began or the task was cancelled.
@@ -373,7 +394,7 @@ extension HermesConversationOwner {
             try await wire.connect()
             try check(attempt)
             try await identify(attempt)
-            // Identity only: the full read below is the one that carries the transcript.
+            // Identity only: the read after the replay is the one that carries the transcript.
             let first = try await resume(full: false, attempt: attempt)
             guard let foundKey = attachedKey(first), let foundRuntime = first["session_id"].text,
                   !foundRuntime.isEmpty, let foundEpoch = wire.replayEpoch else { throw BotFailure.wrongIdentity }
@@ -385,7 +406,7 @@ extension HermesConversationOwner {
             let replay = try await request(.sessionEventsSince(sessionID: foundRuntime, lastSeen: sequence), attempt: attempt)
             let missed = try reconcile(replay)
             owner?.conversationDidReplay(replay, frames: missed)
-            let snapshot = try await resume(full: true, attempt: attempt)
+            let snapshot = try await resume(full: owner?.readsSnapshotHistory ?? true, attempt: attempt)
             try await owner?.conversationDidReadSnapshot(snapshot, runtime: foundRuntime, attempt: attempt)
             try check(attempt)
             guard connectionState == .recovering else { throw BotFailure.transport }
@@ -426,10 +447,10 @@ extension HermesConversationOwner {
         case .session(_, let key):
             root = key; storedKey = key
             owner?.conversationDidIdentify(root: key)
-        case .new(let profile):
+        case .new(let profile, let cwd, let model):
             // A lost reply may leave a session on the host that this phone never learns
             // of. The host keeps no row for it until its first prompt and reaps it.
-            let created = try await request(.sessionNew(profile: profile), attempt: attempt)
+            let created = try await request(.sessionNew(profile: profile, cwd: cwd, model: model), attempt: attempt)
             guard let key = created["stored_session_id"].text, !key.isEmpty,
                   created["session_id"].text?.isEmpty == false else { throw BotFailure.unsupported }
             target = .session(profile: profile, key: key)

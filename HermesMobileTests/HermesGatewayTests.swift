@@ -218,6 +218,27 @@ import XCTest
         XCTAssertEqual(socket.sentRequests.filter { $0["method"].text == "prompt.submit" }.count, 1, "Never resent")
     }
 
+    /// A Profile read controls nothing on the host, so a screen whose task ends while it waits
+    /// (a chat pushed over the Sessions list) keeps its place on the socket.
+    func testCancellingAProfilesReadKeepsItsConsumer() async throws {
+        let http = connection()
+        let list = BotClient(http: http)
+        try await list.connect()
+        defer { list.close() }
+        let socket = try XCTUnwrap(sockets.first)
+        let sent = expectation(description: "roster on the wire")
+        socket.withholdReply = { _ in sent.fulfill(); return true }
+        let roster = Task { try await list.call(.profilesList(includeSessions: false)) }
+        await fulfillment(of: [sent], timeout: 2)
+
+        roster.cancel()
+        do { _ = try await roster.value; XCTFail("A cancelled read gets no reply") }
+        catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        socket.withholdReply = nil
+        let rows = try await list.call(.profilesList(includeSessions: false))["profiles"].list
+        XCTAssertEqual(rows, [], "the screen still reads on the socket")
+    }
+
     /// A required call left unanswered past its deadline ends only its consumer, which hears
     /// it once as a lost connection. The heartbeat and the silence deadline decide whether
     /// the socket itself is gone, so the other consumer stays and the reconnect joins it.
@@ -248,6 +269,36 @@ import XCTest
         _ = try await chat.call(.profilesList(includeSessions: false))
         XCTAssertEqual(sockets.count, 1, "The reconnect joins the open socket")
         XCTAssertEqual(HermesHostFixture.count("/api/auth/ws-ticket"), 1)
+    }
+
+    /// `session.compress` waits on the model's summary as Desktop does (#1050): the usual
+    /// deadline, which still ends another screen's call, never ends it.
+    func testACompressionOutlivesTheUsualDeadline() async throws {
+        let http = connection(rpcDeadline: .milliseconds(50))
+        let chat = BotClient(http: http), other = BotClient(http: http)
+        try await chat.connect()
+        try await other.connect()
+        defer { chat.close(); other.close() }
+        var chatLost = 0
+        chat.onDisconnect = { _ in chatLost += 1 }
+        let socket = try XCTUnwrap(sockets.first)
+        let sent = expectation(description: "compress on the wire")
+        socket.withholdReply = { request in
+            if request["method"].text == "session.compress" { sent.fulfill(); return true }
+            return request["method"].text == "session.resume"
+        }
+
+        let compress = Task { try await chat.call(.sessionCompress(runtime: "runtime", focus: nil, profile: "default")) }
+        await fulfillment(of: [sent], timeout: 2)
+        do {
+            _ = try await other.call(.sessionResume(profile: "default", sessionID: "tip", omitMessages: true))
+            XCTFail("An unanswered call cannot succeed")
+        } catch { XCTAssertEqual(error as? BotFailure, .transport, "the usual deadline passed") }
+        try answer(socket, "session.compress", with: .object(["status": .string("compressed"), "removed": .number(4)]))
+
+        let reply = try await compress.value
+        XCTAssertEqual(reply["removed"].integer, 4)
+        XCTAssertEqual(chatLost, 0)
     }
 
     /// The socket closes with the last screen to leave, and the next screen opens a fresh

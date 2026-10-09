@@ -79,6 +79,22 @@ import Observation
         XCTAssertEqual(chat.model.messages.map(\.content), ["Done."])
     }
 
+    /// A title that is only the reference line a photo-only send appends shows the photo's
+    /// name, never the raw line (#1046).
+    func testAnAttachmentOnlyTitleShowsTheAttachmentsName() async {
+        let chat = await openChat()
+        chat.receive(event(1, "session.title", ["title": .string(Self.photoReference)]))
+        XCTAssertEqual(chat.model.displayTitle, "IMG_2041.jpg")
+    }
+
+    /// The host's instant title cuts a photo's reference line at 48 characters, before the
+    /// photo's name. The header names the chat after the first prompt's photo instead (#1046).
+    func testATitleCutBeforeTheAttachmentsNameShowsTheFirstPromptsAttachment() async {
+        let chat = await openChat(history: [userRow(Self.photoReference)])
+        chat.receive(event(1, "session.title", ["title": .string("[The user attached an image…")]))
+        XCTAssertEqual(chat.model.displayTitle, "IMG_2041.jpg")
+    }
+
     /// An error after the turn's `message.start` with no completion after it: the turn ends
     /// failed when the host settles it.
     func testALoneErrorEndsTheTurnAsFailedWhenTheHostSettles() async {
@@ -364,19 +380,6 @@ import Observation
                             shows: "Hello there. ha ha ha")
     }
 
-    // MARK: Entry
-
-    func testNewSessionIsOfferedOnlyOnAHermesHomeInDebugOrBranchBuilds() {
-        XCTAssertTrue(HermesSessionEntry.isOffered(isHermesHome: true, isDebugBuild: true,
-                                                   bundleIdentifier: "com.uzairansar.hermesmobile"))
-        XCTAssertTrue(HermesSessionEntry.isOffered(isHermesHome: true, isDebugBuild: false,
-                                                   bundleIdentifier: "com.uzairansar.hermesmobile.branch"))
-        XCTAssertFalse(HermesSessionEntry.isOffered(isHermesHome: true, isDebugBuild: false,
-                                                    bundleIdentifier: "com.uzairansar.hermesmobile"), "Release")
-        XCTAssertFalse(HermesSessionEntry.isOffered(isHermesHome: false, isDebugBuild: true,
-                                                    bundleIdentifier: "com.uzairansar.hermesmobile"), "a webui server")
-    }
-
     /// The new session runs under the Profile the dashboard is scoped to (`current`), not the
     /// CLI's sticky default (`active`).
     func testCurrentProfileIsTheDashboardsScopedProfile() async throws {
@@ -391,18 +394,6 @@ import Observation
         let profile = try await client.currentProfile()
         XCTAssertEqual(profile, "inbox-triage")
         XCTAssertEqual(HermesHostFixture.requests.last { $0.url?.path == "/api/profiles/active" }?.httpMethod, "GET")
-    }
-
-    func testHermesSessionHidesHistoryActions() throws {
-        let reply = ChatMessage(role: "assistant", content: "Hi", timestamp: nil, messageId: "a")
-        let context = try XCTUnwrap(MessageActionContext(message: reply, visibleIndex: 0, messagesOffset: 0,
-                                                         offersHistoryActions: false))
-        let menu = ChatMessageActionMenu(
-            context: context, listeningMessageID: nil, isViewingCachedData: false, hasActiveStream: false,
-            isRegeneratingMessage: false, isEditingMessage: false, isForkingMessage: false,
-            onToggleListening: { _ in }, onRegenerate: { _ in }, onEdit: { _ in }, onFork: { _ in }, onCopy: { _ in }
-        )
-        XCTAssertEqual(menu.items.map(\.kind), [.listen])
     }
 
     // MARK: Fixture
@@ -431,8 +422,14 @@ import Observation
         }
     }
 
+    /// The two reference lines a photo-only send appends, for an upload the host named
+    /// `dashboard_<date>_<time>_<hex>_IMG_2041.jpg`.
+    private static let photoReference = "[The user attached an image: dashboard_20261005_120000_0123abcd_IMG_2041.jpg]\n"
+        + "[Examine it with the vision_analyze tool using image_url: /home/u/.hermes/images/dashboard_20261005_120000_0123abcd_IMG_2041.jpg]"
+
     private func openChat(runtime: String = "runtime", key: String = "tip", profile: String = "default",
-                          target: ConversationTarget? = nil, drafts: ChatDraftStore? = nil) async -> Chat {
+                          target: ConversationTarget? = nil, drafts: ChatDraftStore? = nil,
+                          history: [BotJSON] = []) async -> Chat {
         addTeardownBlock { HermesHostFixture.reset() }
         let host = BotSocketHost()
         host.always("session.resume", .init(result: resume(running: false, runtime: runtime, key: key, profile: profile)))
@@ -443,6 +440,7 @@ import Observation
             "messages": .array([]), "info": .object(["profile_name": .string(profile)])
         ])))
         let client = BotClient(http: host.connection(Self.connection))
+        serveHistory(history, key: key)
         let engine = HermesConversation(server: URL(string: "https://hermes.example")!, connection: Self.connection,
                                         target: target ?? .session(profile: profile, key: key), wire: client)
         let turn = HermesChatTurnCoordinator(engine: engine, isNetworkAvailable: { true })
@@ -474,8 +472,8 @@ import Observation
         let held = held ?? [event(7, "message.delta", ["text": .string(", fri")]),
                             event(8, "message.delta", ["text": .string("end")]),
                             event(9, "message.delta", ["text": .string(".")])]
-        let snapshot = resume(running: true, history: [userRow("Hi")],
-                              inflight: ["user": .string("Hi"), "assistant": .string(reply)])
+        serveHistory([userRow("Hi")])
+        let snapshot = resume(running: true, inflight: ["user": .string("Hi"), "assistant": .string(reply)])
         chat.host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 6, events: replayed)))
         chat.host.next("session.resume", .init(result: snapshot))
         chat.host.next("session.resume", .init(result: snapshot, before: held))
@@ -483,7 +481,10 @@ import Observation
         chat.receive(frame)
         await waitUntil("rebuilt") { chat.turn.engine.connectionState == .connected }
         chat.model.flushPendingStreamingContent()
-        XCTAssertEqual(chat.host.transcriptReads(since: leaving), [false, true], "one full read", file: file, line: line)
+        XCTAssertEqual(chat.host.transcriptReads(since: leaving), [false, false], "the snapshot carries no transcript",
+                       file: file, line: line)
+        XCTAssertEqual(HermesHostFixture.count("/api/sessions/tip/messages"), 2, "the gap re-read the newest page",
+                       file: file, line: line)
         XCTAssertEqual(chat.model.messages.map(\.content), ["Hi", shows], file: file, line: line)
 
         let next = (held.compactMap { $0["seq"].integer }.max() ?? 6) + 1
@@ -515,8 +516,17 @@ import Observation
                  "payload": .object(payload)])
     }
 
+    /// A saved prompt as a transcript page carries it (#1047).
     private func userRow(_ text: String) -> BotJSON {
-        .object(["role": .string("user"), "text": .string(text), "timestamp": .number(1_790_000_000)])
+        .object(["id": .number(1), "role": .string("user"), "content": .string(text), "timestamp": .number(1_790_000_000)])
+    }
+
+    /// Serves `rows` as session `key`'s settled history, every page the same.
+    private func serveHistory(_ rows: [BotJSON], key: String = "tip") {
+        _ = HermesHostFixture.configuration { request in
+            guard request.url?.path == "/api/sessions/\(key)/messages" else { return nil }
+            return .json(200, .object(["session_id": .string(key), "messages": .array(rows)]))
+        }
     }
 
     private func resume(running: Bool, runtime: String = "runtime", key: String = "tip", profile: String = "default",

@@ -404,6 +404,22 @@ final class AuthManager {
         }
     }
 
+    /// An update from Settings installed `version` on the Hermes server `server` (#1075).
+    /// Records it on the server's saved sign-in and its registry entry, where a sign-in would
+    /// have, and changes nothing else: a server waiting on its sign-in form stays there.
+    func hermesServerUpdated(server: URL, to version: String) {
+        let store = BotConnectionStore(keychain: keychain)
+        if var saved = try? store.load(server: server), saved.hermesVersion != version {
+            saved.hermesVersion = version
+            try? store.save(saved, server: server)
+        }
+        guard var account = servers.first(where: { $0.id == server.absoluteString }), account.kind == .hermes,
+              account.serverVersion != version else { return }
+        account.serverVersion = version
+        serverRegistry.update(account)
+        refreshServers()
+    }
+
     /// Updates the in-effect headers from the Settings editor while signed in. The
     /// in-memory snapshot always updates immediately (so live requests pick them
     /// up), but the Keychain write is opt-in: the editor refreshes on every
@@ -557,9 +573,10 @@ final class AuthManager {
 
     /// Deletes `server`'s Bot connection record with that connection's cached avatars,
     /// which also retires its shared sign-in (`BotConnectionStore.remove`), and the Profile
-    /// its New Session remembers (#1015).
+    /// its New Session remembers (#1015) and whether its Sessions list shows every Profile (#709).
     private func removeBotConnection(for server: URL) {
         HermesProfilePreference.save(nil, for: server, in: preferences)
+        HermesProfilePreference.saveShowsAllProfiles(false, for: server, in: preferences)
         let bots = BotConnectionStore(keychain: keychain)
         if let connection = try? bots.load(server: server) {
             BotAvatarStore.shared.removeAll(connectionID: connection.id)

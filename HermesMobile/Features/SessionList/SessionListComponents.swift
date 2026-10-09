@@ -100,9 +100,46 @@ struct SessionListRowActions {
     let export: (SessionSummary, SessionExportFormat) -> Void
 }
 
+/// Which row actions a session offers. A Hermes server's row (#1046, #1048) offers pin,
+/// rename, archive, delete, Export as JSON, Move to Project (#1052) and Duplicate (#1051); the
+/// host has no HTML export, and Hermes deep links are #706.
 enum SessionRowActionPolicy {
+    /// Pin, rename, move, archive and delete. A bot's Bot Chat, which a Hermes search lists
+    /// (#1053), belongs to its bot: pinning would also unhide it, and renaming orphans it.
     static func offersMutationActions(for session: SessionSummary) -> Bool {
-        !session.isSessionReadOnly
+        !session.isSessionReadOnly && session.hermes?.isBotChat != true
+    }
+
+    static func offersProjectMove(for session: SessionSummary) -> Bool {
+        offersMutationActions(for: session)
+    }
+
+    /// Not on an archived match a Hermes search lists (#1053): the Archived screen restores it.
+    static func offersArchive(for session: SessionSummary) -> Bool {
+        offersMutationActions(for: session) && session.archived != true
+    }
+
+    /// "No project" in the Move menu. A Hermes session always works in some folder, so it can
+    /// only move to another project's (#1052).
+    static func offersRemoveFromProject(for session: SessionSummary) -> Bool {
+        session.hermes == nil
+    }
+
+    /// The projects the Move menu lists. On Hermes only the user's own projects with a folder
+    /// take a session; an automatic per-repository one is just where sessions in that repository
+    /// already are.
+    static func moveTargets(_ projects: [ProjectSummary]) -> [ProjectSummary] {
+        projects.filter { project in project.hermes.map { !$0.isAutomatic && $0.folder != nil } ?? true }
+    }
+
+    /// Rename and Delete on a project row. A Hermes automatic project has no record to change.
+    static func offersProjectEditing(_ project: ProjectSummary) -> Bool {
+        project.hermes?.isAutomatic != true
+    }
+
+    /// The Export menu's formats, in menu order.
+    static func exportFormats(for session: SessionSummary) -> [SessionExportFormat] {
+        session.hermes == nil ? [.html, .json] : [.json]
     }
 
     static func canDuplicate(_ session: SessionSummary) -> Bool {
@@ -118,7 +155,7 @@ enum SessionRowActionPolicy {
         isViewingCachedData: Bool,
         isMutating: Bool
     ) -> URL? {
-        guard !isMutating,
+        guard !isMutating, session.hermes == nil,
               canExport(session, isViewingCachedData: isViewingCachedData),
               let sessionID = session.sessionId
         else {
@@ -157,6 +194,198 @@ enum SessionListMotion {
 
     static func disclosureContentTransition(reduceMotion: Bool) -> AnyTransition {
         reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top))
+    }
+}
+
+/// The session list's header (#283), on webui's list and both sides of a Hermes home (#709):
+/// HERMEX, and one glass pill of search and the server's avatar. A tap on the avatar opens
+/// Settings and a hold switches servers. With a `field`, search grows the pill into a text field
+/// that pushes the wordmark out and turns the avatar into Close; without one (the Bots side,
+/// whose search is a sheet) the pill stays put and `openSearch` alone runs.
+struct SessionsHeader: View {
+    /// The pill's search field and the state it grows with.
+    struct Field {
+        let isExpanded: Bool
+        let text: Binding<String>
+        let isFocused: FocusState<Bool>.Binding
+        let close: () -> Void
+    }
+
+    /// The server's avatar and what it opens.
+    struct Avatar {
+        let initials: String
+        let color: Color
+        let foreground: Color
+        let servers: AvatarServerSwitcherModel
+        let openSettings: () -> Void
+        let switchToServer: (ServerAccount) -> Void
+        let addServer: () -> Void
+        let manageServers: () -> Void
+    }
+
+    private static let iconVisualSize: CGFloat = 36
+    private static let iconHitTarget: CGFloat = 44
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let logoColor: Color
+    let avatar: Avatar
+    var field: Field?
+    /// What the search button opens, for VoiceOver: the sessions, or the Bots side's sheet.
+    var searchLabel: LocalizedStringKey = "Search sessions"
+    var isSearchDisabled = false
+    let openSearch: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: isExpanded ? 0 : 16) {
+            HermesHeaderLogo(selectedColor: logoColor)
+                .frame(width: isExpanded ? 0 : 160, alignment: .leading)
+                .opacity(isExpanded ? 0 : 1)
+                .clipped()
+                .accessibilityHidden(isExpanded)
+
+            pill
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .animation(SessionListMotion.searchChromeAnimation(reduceMotion: reduceMotion), value: isExpanded)
+        .animation(SessionListMotion.searchFocusAnimation(reduceMotion: reduceMotion), value: showsClearButton)
+    }
+
+    private var isExpanded: Bool { field?.isExpanded == true }
+
+    private var showsClearButton: Bool {
+        guard let field else { return false }
+        return field.isExpanded && !field.text.wrappedValue.isEmpty
+    }
+
+    private var pill: some View {
+        HStack(spacing: isExpanded ? 8 : 4) {
+            HapticButton {
+                if isExpanded, let field {
+                    field.isFocused.wrappedValue = true
+                } else {
+                    openSearch()
+                }
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(isExpanded ? .secondary : .primary)
+                    .frame(width: Self.iconVisualSize, height: Self.iconVisualSize)
+                    .frame(width: Self.iconHitTarget, height: Self.iconHitTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isSearchDisabled)
+            .accessibilityLabel(isExpanded ? Text("Focus session search") : Text(searchLabel))
+            .accessibilityHint(field == nil ? Text(verbatim: "") : Text("Shows the session search field."))
+            .accessibilityHidden(isExpanded)
+
+            if let field {
+                textField(field)
+
+                if showsClearButton {
+                    clearButton(field)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            } else {
+                // Holds the collapsed field's slot, and the spacing around it, so the pill is
+                // the same size with or without a field.
+                Color.clear.frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+
+            trailingButton
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: isExpanded ? .infinity : nil, alignment: .trailing)
+        .sessionsChromeGlass(isInteractive: true, in: Capsule())
+        .clipShape(Capsule())
+        .contentShape(Capsule())
+    }
+
+    private func textField(_ field: Field) -> some View {
+        TextField("Search sessions", text: field.text)
+            .font(AppFont.subheadline())
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .focused(field.isFocused)
+            .submitLabel(.done)
+            .lineLimit(1)
+            .layoutPriority(1)
+            .frame(maxWidth: isExpanded ? .infinity : 0)
+            .opacity(isExpanded ? 1 : 0)
+            .clipped()
+            .accessibilityHidden(!isExpanded)
+    }
+
+    private func clearButton(_ field: Field) -> some View {
+        Button {
+            field.text.wrappedValue = ""
+            field.isFocused.wrappedValue = true
+        } label: {
+            Image(systemName: "xmark.circle.fill")
+                .font(AppFont.subheadline())
+                .foregroundStyle(.secondary)
+                .frame(width: Self.iconVisualSize, height: Self.iconVisualSize)
+                .frame(width: Self.iconHitTarget, height: Self.iconHitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Clear search")
+    }
+
+    private var trailingButton: some View {
+        HapticButton(feedbackStyle: .medium) {
+            if isExpanded, let field {
+                field.close()
+            } else {
+                avatar.openSettings()
+            }
+        } label: {
+            ZStack {
+                Text(avatar.initials)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(avatar.foreground)
+                    .frame(width: Self.iconVisualSize, height: Self.iconVisualSize)
+                    .background(avatar.color, in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
+                    .opacity(isExpanded ? 0 : 1)
+                    .scaleEffect(isExpanded ? 0.72 : 1)
+                    .rotationEffect(.degrees(isExpanded ? -18 : 0))
+
+                Image(systemName: "xmark")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: Self.iconVisualSize, height: Self.iconVisualSize)
+                    .opacity(isExpanded ? 1 : 0)
+                    .scaleEffect(isExpanded ? 1 : 0.72)
+                    .rotationEffect(.degrees(isExpanded ? 0 : 18))
+            }
+            .frame(width: Self.iconHitTarget, height: Self.iconHitTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isExpanded ? "Close search" : "Settings")
+        .accessibilityHint(
+            isExpanded
+                ? "Closes search and clears the current query."
+                : "Opens Settings. Long press to switch servers."
+        )
+        // Long-press the avatar to switch the active server, reusing #17's
+        // switch/add actions. Suppressed while search is expanded so the
+        // "close search" tap state is untouched (#283). The plain tap above is
+        // preserved — `contextMenu` adds long-press without stealing the tap.
+        .contextMenu {
+            if !isExpanded {
+                AvatarServerSwitcherMenu(
+                    model: avatar.servers,
+                    switchToServer: avatar.switchToServer,
+                    addServer: avatar.addServer,
+                    manageServers: avatar.manageServers
+                )
+            }
+        }
     }
 }
 
@@ -476,7 +705,9 @@ struct SessionSidebarUtilityRows: View {
         return profile.isActive == true
     }
 
+    /// A Hermes lane shows the host's count, as Desktop does, which takes in sessions not yet paged in.
     private func sessionCount(for project: ProjectSummary) -> Int {
+        if let hermes = project.hermes { return hermes.sessionCount }
         guard let projectID = project.projectId else { return 0 }
         return viewModel.sessions.filter { session in
             session.projectId == projectID && automatedVisibility.shows(session)
@@ -569,7 +800,7 @@ struct SessionListRowsSection: View {
     }
 
     private func sessionsErrorRow(message errorMessage: String) -> some View {
-        let content = sessionsErrorContent(fallbackMessage: errorMessage)
+        let content = Self.errorContent(for: viewModel.sessionLoadError, fallbackMessage: errorMessage)
 
         return VStack(alignment: .leading, spacing: 10) {
             SessionListStatusRow(
@@ -591,9 +822,12 @@ struct SessionListRowsSection: View {
         .padding(.horizontal, 24)
     }
 
-    private func sessionsErrorContent(fallbackMessage: String) -> (title: String, description: String) {
-        if let sessionLoadError = viewModel.sessionLoadError,
-           CacheFallbackPolicy.shouldUseCache(for: sessionLoadError) {
+    /// The error row's title and text for a list load that failed with `error`: the webui
+    /// server's unreachable copy for a failure the offline cache covers, else `fallbackMessage`.
+    /// A Hermes failure keeps its `BotConnectionAdvice` text, which names the proxy, tunnel or
+    /// socket at fault.
+    static func errorContent(for error: Error?, fallbackMessage: String) -> (title: String, description: String) {
+        if let error, !(error is BotFailure), CacheFallbackPolicy.shouldUseCache(for: error) {
             return (
                 String(localized: "Cannot reach server"),
                 String(localized: "Check that your Mac is awake and cloudflared is running.")
@@ -628,7 +862,9 @@ struct SessionInteractiveRow: View {
                 isViewingCachedData: viewModel.isViewingCachedData,
                 isUnread: viewModel.isUnread(session),
                 attentionState: viewModel.attentionState(for: session),
-                searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText)
+                searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText),
+                labelsArchived: true,
+                profileTag: viewModel.hermesShowsAllProfiles ? session.profile : nil
             )
         }
         .buttonStyle(.plain)
@@ -680,13 +916,15 @@ struct SessionInteractiveRow: View {
     @ViewBuilder
     private func sessionTrailingSwipeActions(for session: SessionSummary) -> some View {
         if canShowSessionMutationActions(for: session) {
-            Button {
-                actions.archive(session)
-            } label: {
-                Label("Archive", systemImage: "archivebox")
+            if SessionRowActionPolicy.offersArchive(for: session) {
+                Button {
+                    actions.archive(session)
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                .disabled(viewModel.isMutating(session))
+                .tint(.orange)
             }
-            .disabled(viewModel.isMutating(session))
-            .tint(.orange)
 
             Button {
                 actions.delete(session)
@@ -913,34 +1151,63 @@ struct SessionRowContextMenu: View {
                 .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
             }
 
-            Menu {
-                SessionProjectMoveMenu(
-                    session: session,
-                    projects: projects,
-                    isCreatingProject: isCreatingProject,
-                    isMovingSession: isMovingSession,
-                    isLoadingProjects: isLoadingProjects,
-                    actions: actions
-                )
-            } label: {
-                Label("Move to Project", systemImage: "folder")
+            if SessionRowActionPolicy.offersProjectMove(for: session) {
+                Menu {
+                    SessionProjectMoveMenu(
+                        session: session,
+                        projects: projects,
+                        isCreatingProject: isCreatingProject,
+                        isMovingSession: isMovingSession,
+                        isLoadingProjects: isLoadingProjects,
+                        actions: actions
+                    )
+                } label: {
+                    Label("Move to Project", systemImage: "folder")
+                }
+                .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
             }
-            .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
         }
 
         // Export works for any session the server can see, including read-only
         // and foreign/CLI rows; it only needs a live server session ID.
-        Menu {
-            Button {
-                actions.export(session, .html)
-            } label: {
-                Label("Export as HTML", systemImage: "doc.richtext")
+        exportMenu
+
+        if SessionRowActionPolicy.offersMutationActions(for: session) {
+            if SessionRowActionPolicy.offersArchive(for: session) {
+                Button {
+                    actions.archive(session)
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                .disabled(!canShowSessionMutationActions || isMutating)
             }
 
-            Button {
-                actions.export(session, .json)
+            Button(role: .destructive) {
+                actions.delete(session)
             } label: {
-                Label("Export as JSON", systemImage: "curlybraces")
+                Label("Delete", systemImage: "trash")
+            }
+            .disabled(!canShowSessionMutationActions || isMutating)
+        }
+    }
+
+    private var exportMenu: some View {
+        Menu {
+            ForEach(SessionRowActionPolicy.exportFormats(for: session), id: \.self) { format in
+                switch format {
+                case .html:
+                    Button {
+                        actions.export(session, .html)
+                    } label: {
+                        Label("Export as HTML", systemImage: "doc.richtext")
+                    }
+                case .json:
+                    Button {
+                        actions.export(session, .json)
+                    } label: {
+                        Label("Export as JSON", systemImage: "curlybraces")
+                    }
+                }
             }
 
             if let deepLinkURL = SessionRowActionPolicy.deepLinkURL(
@@ -959,22 +1226,6 @@ struct SessionRowContextMenu: View {
             Label("Export", systemImage: "square.and.arrow.up")
         }
         .disabled(!canExportSession || isMutating)
-
-        if SessionRowActionPolicy.offersMutationActions(for: session) {
-            Button {
-                actions.archive(session)
-            } label: {
-                Label("Archive", systemImage: "archivebox")
-            }
-            .disabled(!canShowSessionMutationActions || isMutating)
-
-            Button(role: .destructive) {
-                actions.delete(session)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-            .disabled(!canShowSessionMutationActions || isMutating)
-        }
     }
 
     private var canShowSessionMutationActions: Bool {
@@ -997,17 +1248,24 @@ struct SessionProjectMoveMenu: View {
     let actions: SessionListRowActions
 
     var body: some View {
-        Button {
-            actions.move(session, nil)
-        } label: {
-            Label("No project", systemImage: session.projectId == nil ? "checkmark" : "tray")
+        let offersRemove = SessionRowActionPolicy.offersRemoveFromProject(for: session)
+        let targets = SessionRowActionPolicy.moveTargets(projects)
+
+        if offersRemove {
+            Button {
+                actions.move(session, nil)
+            } label: {
+                Label("No project", systemImage: session.projectId == nil ? "checkmark" : "tray")
+            }
+            .disabled(isMovingSession || session.projectId == nil)
         }
-        .disabled(isMovingSession || session.projectId == nil)
 
-        if !projects.isEmpty {
-            Divider()
+        if !targets.isEmpty {
+            if offersRemove {
+                Divider()
+            }
 
-            ForEach(projects) { project in
+            ForEach(targets) { project in
                 let projectID = project.projectId
                 let isSelected = session.projectId == projectID
                 let projectName = project.name.flatMap { $0.isEmpty ? nil : $0 } ?? String(localized: "Untitled Project")
@@ -1024,7 +1282,9 @@ struct SessionProjectMoveMenu: View {
             }
         }
 
-        Divider()
+        if offersRemove || !targets.isEmpty {
+            Divider()
+        }
 
         Button {
             actions.createProject(session)
@@ -1443,31 +1703,9 @@ struct ProjectFilterRow: View {
             .accessibilityValue(accessibilityValue)
             .accessibilityHint(isSelected ? "Clears this project filter." : "Filters sessions to this project.")
 
-            Menu {
-                Button {
-                    rename()
-                } label: {
-                    Label("Rename Project", systemImage: "pencil")
-                }
-                .disabled(projectActionsAreDisabled)
-
-                Button(role: .destructive) {
-                    delete()
-                } label: {
-                    Label("Delete Project", systemImage: "trash")
-                }
-                .disabled(projectActionsAreDisabled)
-            } label: {
-                Label(String(localized: "Project actions for \(displayName)"), systemImage: "ellipsis")
-                    .labelStyle(.iconOnly)
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+            if SessionRowActionPolicy.offersProjectEditing(project) {
+                actionsMenu
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "Project actions for \(displayName)"))
-            .accessibilityHint("Shows rename and delete actions for this project.")
         }
         .background {
             if isSelected {
@@ -1479,6 +1717,34 @@ struct ProjectFilterRow: View {
                     }
             }
         }
+    }
+
+    private var actionsMenu: some View {
+        Menu {
+            Button {
+                rename()
+            } label: {
+                Label("Rename Project", systemImage: "pencil")
+            }
+            .disabled(projectActionsAreDisabled)
+
+            Button(role: .destructive) {
+                delete()
+            } label: {
+                Label("Delete Project", systemImage: "trash")
+            }
+            .disabled(projectActionsAreDisabled)
+        } label: {
+            Label(String(localized: "Project actions for \(displayName)"), systemImage: "ellipsis")
+                .labelStyle(.iconOnly)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "Project actions for \(displayName)"))
+        .accessibilityHint("Shows rename and delete actions for this project.")
     }
 
     private var displayName: String {

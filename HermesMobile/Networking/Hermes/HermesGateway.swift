@@ -132,6 +132,16 @@ import OSLog
         end(nil)
     }
 
+    /// Ends the socket as lost after the dashboard restarted (#1075), whose old socket can
+    /// linger half-open behind a tunnel: attached screens hear `.transport` once and reconnect
+    /// on their own, as after any drop. Nothing happens while no socket is open or opening.
+    func dropSocket() {
+        guard socket != nil || opening != nil else { return }
+        let label = socketLabel(generation)
+        HermesConnectionLog.logger.notice("\(label, privacy: .public) closed, dashboard restarted")
+        end(BotFailure.transport)
+    }
+
     /// Ends the socket for good because the connection was replaced. Attached screens hear
     /// `.stale` once, and every later `join` throws it.
     func retire() {
@@ -159,7 +169,7 @@ import OSLog
         } else { text = String(decoding: try JSONEncoder().encode(frame), as: UTF8.self) }
         let timesOutLocally = call.timesOutLocally, cancellationSafe = call.isCancellationSafe
         let rejection = call.rejection, rpcDeadline = call.deadline(options.rpcDeadline), method = call.method
-        return try await withTaskCancellationHandler {
+        let reply: BotJSON = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let deadline = Task { [weak self] in
                     do { try await Task.sleep(for: rpcDeadline) } catch { return }
@@ -186,6 +196,14 @@ import OSLog
         } onCancel: {
             Task { @MainActor [weak self] in self?.cancel(id, generation: owner, safely: cancellationSafe) }
         }
+        switch call {
+        // A branch's reply names the runtime the host made for it (#1051).
+        case .sessionResume, .sessionBranch:
+            if let runtime = reply["session_id"].text, !runtime.isEmpty { http.noteAttached(runtime) }
+        case .sessionClose(let runtime): http.noteClosed(runtime)
+        default: break
+        }
+        return reply
     }
 
     /// A cancelled read discards its late reply. Any other cancelled call may have reached
@@ -432,8 +450,8 @@ private extension HermesCall {
     /// because its outcome is unknown.
     var isCancellationSafe: Bool {
         switch self {
-        case .fileAttach, .completePath, .completeSlash, .subagentList, .subagentTail, .sessionActiveList,
-             .profileModelOptions: return true
+        case .fileAttach, .completePath, .completeFolder, .completeSlash, .subagentList, .subagentTail,
+             .sessionActiveList, .sessionMostRecent, .profilesList, .profileModelOptions, .projectsTree: return true
         default: return false
         }
     }
@@ -443,28 +461,40 @@ private extension HermesCall {
     /// screen's connection; the socket stays for the others.
     var timesOutLocally: Bool {
         switch self {
-        case .subagentList, .subagentTail, .sessionActiveList, .completeSlash, .slashExec, .profileModelOptions: return true
+        case .subagentList, .subagentTail, .sessionActiveList, .sessionMostRecent, .completeSlash, .slashExec,
+             .profileModelOptions, .projectsTree, .completeFolder: return true
         default: return false
         }
     }
 
     /// How long a reply may take. A slash command may run in the host's slash worker, which
-    /// allows it 45 s, so `slash.exec` waits twice the usual deadline.
+    /// allows it 45 s, so `slash.exec` waits twice the usual deadline. A compaction asks the
+    /// model for its summary, so `session.compress` (#1050) waits as long as Desktop does
+    /// (`SESSION_COMPRESS_TIMEOUT_MS`), past the host's own 630 s cap.
     func deadline(_ standard: Duration) -> Duration {
-        if case .slashExec = self { return standard * 2 }
-        return standard
+        switch self {
+        case .slashExec: return standard * 2
+        case .sessionCompress: return .seconds(660)
+        default: return standard
+        }
     }
 
     /// Room rejections carry the host's reason as `BotRoomFailure`; setting rejections
     /// carry its message as `BotSettingFailure`. So do a refused `/goal`, whose 4004 message
-    /// says what was wrong with it (#1013), and a refused slash command (#1036).
+    /// says what was wrong with it (#1013), a refused slash command (#1036), a refused
+    /// `/title`, whose 4022 message names the session already using it (#1048), a refused
+    /// rewind or `/undo`, whose 5008 message says why the host could not write the cut (#1049),
+    /// a refused `/compress`, whose 5005 message says why the compaction failed (#1050), a
+    /// refused project change or move, such as 5063 naming the project that has the folder (#1052),
+    /// and a refused branch, whose 5008 message names the session using its name (#1051).
     var rejection: Rejection {
         if method.hasPrefix("groups.") { return .room }
         switch self {
         case .configSet, .sessionCwdSet, .sessionControl, .modelOptions, .configuredModelOptions, .profileModelOptions,
              .sessionControlRead: return .setting
         case .commandDispatch(let name, _, _) where name == "goal": return .setting
-        case .slashExec: return .setting
+        case .slashExec, .sessionRename, .promptRewind, .sessionUndo, .sessionCompress, .sessionWorkspaceMove,
+             .projectsCreate, .projectsUpdate, .projectsDelete, .sessionBranch: return .setting
         default: return .plain
         }
     }

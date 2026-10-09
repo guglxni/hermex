@@ -41,7 +41,33 @@ final class HermesRequestTests: XCTestCase {
              ["profile": .string("triage"), "title": .string("Bot Chat"), "include_hidden": .bool(true)]),
             (.sessionCreate(profile: "triage"), "session.create",
              ["profile": .string("triage"), "title": .string("Bot Chat"), "hidden": .bool(true), "follow_profile_config": .bool(true)]),
+            (.sessionNew(profile: "triage"), "session.create", ["profile": .string("triage")]),
+            (.sessionNew(profile: "triage", cwd: "/work", model: .init(id: "gpt-6", provider: "openai")), "session.create",
+             ["profile": .string("triage"), "cwd": .string("/work"), "model": .string("gpt-6"), "provider": .string("openai")]),
             (.sessionTitle(sessionID: "runtime"), "session.title", ["session_id": .string("runtime"), "title": .string("Bot Chat")]),
+            (.sessionRename(runtime: "runtime", title: "Plan"), "session.title",
+             ["session_id": .string("runtime"), "title": .string("Plan")]),
+            (.sessionClose(runtime: "runtime"), "session.close", ["session_id": .string("runtime")]),
+            (.sessionDelete(profile: "triage", storedKey: "tip"), "session.delete",
+             ["session_id": .string("tip"), "profile": .string("triage")]),
+            (.sessionBranch(runtime: "runtime", name: nil, count: 6), "session.branch",
+             ["session_id": .string("runtime"), "count": .number(6)]),
+            (.sessionBranch(runtime: "runtime", name: "Experiment", count: nil), "session.branch",
+             ["session_id": .string("runtime"), "name": .string("Experiment")]),
+            (.sessionWorkspaceMove(profile: "triage", storedKey: "tip", cwd: "/work"), "session.workspace.move",
+             ["session_key": .string("tip"), "cwd": .string("/work"), "profile": .string("triage")]),
+            (.projectsTree(profile: "triage"), "projects.tree", ["profile": .string("triage")]),
+            (.projectsCreate(profile: "triage", name: "Launch", folder: "/work", color: "#7cb9ff"), "projects.create",
+             ["profile": .string("triage"), "name": .string("Launch"), "folders": .array([.string("/work")]),
+              "primary_path": .string("/work"), "color": .string("#7cb9ff")]),
+            (.projectsCreate(profile: "triage", name: "Launch", folder: "/work", color: nil), "projects.create",
+             ["profile": .string("triage"), "name": .string("Launch"), "folders": .array([.string("/work")]),
+              "primary_path": .string("/work")]),
+            (.projectsUpdate(profile: "triage", id: "p_1", name: "Launch", color: "#f5c542"), "projects.update",
+             ["profile": .string("triage"), "id": .string("p_1"), "name": .string("Launch"), "color": .string("#f5c542")]),
+            (.projectsUpdate(profile: "triage", id: "p_1", name: "Launch", color: nil), "projects.update",
+             ["profile": .string("triage"), "id": .string("p_1"), "name": .string("Launch")]),
+            (.projectsDelete(profile: "triage", id: "p_1"), "projects.delete", ["profile": .string("triage"), "id": .string("p_1")]),
             (.sessionResume(profile: "triage", sessionID: "tip", omitMessages: false), "session.resume",
              ["profile": .string("triage"), "session_id": .string("tip"), "close_on_disconnect": .bool(false)]),
             (.sessionResume(profile: "triage", sessionID: "tip", omitMessages: true), "session.resume",
@@ -58,6 +84,11 @@ final class HermesRequestTests: XCTestCase {
             (.sessionSteer(sessionID: "runtime", text: "hi"), "session.steer", ["session_id": .string("runtime"), "text": .string("hi")]),
             (.sessionRedirect(sessionID: "runtime", text: "hi"), "session.redirect", ["session_id": .string("runtime"), "text": .string("hi")]),
             (.sessionInterrupt(sessionID: "runtime"), "session.interrupt", ["session_id": .string("runtime")]),
+            (.sessionUndo(runtime: "runtime"), "session.undo", ["session_id": .string("runtime")]),
+            (.sessionCompress(runtime: "runtime", focus: nil, profile: "triage"), "session.compress",
+             ["session_id": .string("runtime"), "profile": .string("triage")]),
+            (.sessionCompress(runtime: "runtime", focus: "the API", profile: "triage"), "session.compress",
+             ["session_id": .string("runtime"), "profile": .string("triage"), "focus_topic": .string("the API")]),
             (.promptBtw(sessionID: "runtime", text: "why?"), "prompt.btw", ["session_id": .string("runtime"), "text": .string("why?")]),
             (.promptBackground(sessionID: "runtime", text: "sum up"), "prompt.background",
              ["session_id": .string("runtime"), "text": .string("sum up")]),
@@ -100,6 +131,8 @@ final class HermesRequestTests: XCTestCase {
              ["name": .string("work"), "arg": .string("fix it"), "session_id": .string("runtime")]),
             (.completePath(word: "src", sessionID: "runtime", profile: "triage"), "complete.path",
              ["word": .string("src"), "session_id": .string("runtime"), "profile": .string("triage")]),
+            (.completeFolder(word: "~/src/ap", profile: "triage"), "complete.path",
+             ["word": .string("~/src/ap"), "profile": .string("triage")]),
             (.completeSlash(text: "/approvals ", sessionID: "runtime"), "complete.slash",
              ["text": .string("/approvals "), "session_id": .string("runtime")]),
             (.slashExec(sessionID: "runtime", command: "/context all"), "slash.exec",
@@ -140,6 +173,52 @@ final class HermesRequestTests: XCTestCase {
         }
     }
 
+    /// A rename needs a runtime and a title, and a delete names its Profile and stored key (#1048);
+    /// a branch names its runtime, and any name or count it carries is real (#1051).
+    func testSessionLifecycleCallsRefuseAnEmptyTarget() {
+        XCTAssertThrowsError(try HermesCall.sessionBranch(runtime: "", name: nil, count: nil).params())
+        XCTAssertThrowsError(try HermesCall.sessionBranch(runtime: "runtime", name: " \n", count: nil).params())
+        XCTAssertThrowsError(try HermesCall.sessionBranch(runtime: "runtime", name: nil, count: 0).params())
+        XCTAssertThrowsError(try HermesCall.sessionRename(runtime: "runtime", title: " \n").params())
+        XCTAssertThrowsError(try HermesCall.sessionRename(runtime: "", title: "Plan").params())
+        XCTAssertThrowsError(try HermesCall.sessionClose(runtime: "").params())
+        XCTAssertThrowsError(try HermesCall.sessionDelete(profile: "", storedKey: "tip").params())
+        XCTAssertThrowsError(try HermesCall.sessionDelete(profile: "triage", storedKey: "").params())
+    }
+
+    /// A compaction names its runtime and Profile, and a focus only when there is one; a new
+    /// session's folder and model are never blank (#1050).
+    func testCompressAndNewSessionCallsRefuseBlankValues() {
+        XCTAssertThrowsError(try HermesCall.sessionCompress(runtime: "", focus: nil, profile: "triage").params())
+        XCTAssertThrowsError(try HermesCall.sessionCompress(runtime: "runtime", focus: nil, profile: "").params())
+        XCTAssertThrowsError(try HermesCall.sessionCompress(runtime: "runtime", focus: " \n", profile: "triage").params())
+        XCTAssertThrowsError(try HermesCall.sessionNew(profile: "triage", cwd: "").params())
+        XCTAssertThrowsError(try HermesCall.sessionNew(profile: "triage", model: .init(id: "gpt-6", provider: "")).params())
+    }
+
+    /// A project names its Profile, a name and a folder, and a move a stored session and a
+    /// folder; a folder is completed only from the host's root or home (#1052).
+    func testProjectAndMoveCallsRefuseBlankValues() {
+        let refused: [HermesCall] = [
+            .projectsTree(profile: ""),
+            .projectsCreate(profile: "triage", name: " ", folder: "/work", color: nil),
+            .projectsCreate(profile: "triage", name: "Launch", folder: "", color: nil),
+            .projectsCreate(profile: "triage", name: "Launch", folder: "/work", color: ""),
+            .projectsUpdate(profile: "triage", id: "p_1", name: "", color: nil),
+            .projectsUpdate(profile: "triage", id: "", name: "Launch", color: nil),
+            .projectsDelete(profile: "triage", id: ""),
+            .sessionWorkspaceMove(profile: "triage", storedKey: "", cwd: "/work"),
+            .sessionWorkspaceMove(profile: "triage", storedKey: "tip", cwd: " "),
+            .sessionWorkspaceMove(profile: "", storedKey: "tip", cwd: "/work"),
+            .completeFolder(word: "src/app", profile: "triage"),
+            .completeFolder(word: "~", profile: "triage"),
+            .completeFolder(word: "/work", profile: "")
+        ]
+        for call in refused {
+            XCTAssertThrowsError(try call.params(), "\(call)")
+        }
+    }
+
     /// Slash commands go out one typed line at a time, and completion only at a command's
     /// argument stage (#1036).
     func testSlashCallsAdmitOnlyOneNamedLine() {
@@ -161,6 +240,8 @@ final class HermesRequestTests: XCTestCase {
     func testEveryRESTRequestKeepsItsMethodPathQueryAndBody() throws {
         let base = URL(string: "https://hermes.example:9120")!
         let json = ["Content-Type": "application/json"]
+        let imported = BotJSON.object(["sessions": .array([.object(["id": .string("20261008_002420_fb927d")])]),
+                                       "profile": .string("triage")])
         let cases: [(HermesREST, String, String, BotJSON?, [String: String])] = [
             (.status, "GET", "https://hermes.example:9120/api/status", nil, [:]),
             (.login(username: "user", password: "pass"), "POST", "https://hermes.example:9120/auth/password-login",
@@ -188,6 +269,16 @@ final class HermesRequestTests: XCTestCase {
             (.pluginsHub, "GET", "https://hermes.example:9120/api/dashboard/plugins/hub", nil, [:]),
             (.sessionMessages(key: "bg_0a5110", profile: "triage"), "GET",
              "https://hermes.example:9120/api/sessions/bg_0a5110/messages?profile=triage", nil, [:]),
+            (.sessionList(profile: "triage", offset: 100, archived: true), "GET",
+             "https://hermes.example:9120/api/sessions?profile=triage&order=recent&archived=only&limit=100&offset=100&exclude_sources=cron,kanban,oneshot,subagent,tool",
+             nil, [:]),
+            (.updateSession(key: "tip", profile: "triage", change: .title("Plan")), "PATCH",
+             "https://hermes.example:9120/api/sessions/tip", .object(["title": .string("Plan"), "profile": .string("triage")]), json),
+            (.sessionExport(key: "tip", profile: "triage"), "GET",
+             "https://hermes.example:9120/api/sessions/tip/export?profile=triage", nil, [:]),
+            (.sessionRow(key: "tip", profile: "triage"), "GET", "https://hermes.example:9120/api/sessions/tip?profile=triage", nil, [:]),
+            (.importSessions(body: try JSONEncoder().encode(imported)), "POST", "https://hermes.example:9120/api/sessions/import",
+             imported, json),
             (.cronJobs, "GET", "https://hermes.example:9120/api/cron/jobs", nil, [:]),
             (.cronCreate(profile: "research", fields: ["schedule": .string("0 9 * * *")]), "POST",
              "https://hermes.example:9120/api/cron/jobs?profile=research", .object(["schedule": .string("0 9 * * *")]), json),
@@ -208,6 +299,18 @@ final class HermesRequestTests: XCTestCase {
             (.cronDeliveryTargets(profile: "research"), "GET",
              "https://hermes.example:9120/api/cron/delivery-targets?profile=research", nil, [:]),
             (.skills(profile: "research"), "GET", "https://hermes.example:9120/api/skills?profile=research", nil, [:]),
+            (.fsReadText(path: "/h/a+b c/MEMORY.md"), "GET",
+             "https://hermes.example:9120/api/fs/read-text?path=/h/a%2Bb%20c/MEMORY.md", nil, [:]),
+            (.fsWriteText(path: "/h/memories/MEMORY.md", content: "a\n§\nb"), "POST", "https://hermes.example:9120/api/fs/write-text",
+             .object(["path": .string("/h/memories/MEMORY.md"), "content": .string("a\n§\nb")]), json),
+            (.filesMkdir(path: "/h/memories"), "POST", "https://hermes.example:9120/api/files/mkdir",
+             .object(["path": .string("/h/memories")]), json),
+            (.config(profile: "research"), "GET", "https://hermes.example:9120/api/config?profile=research", nil, [:]),
+            (.profileSoul(name: "research"), "GET", "https://hermes.example:9120/api/profiles/research/soul", nil, [:]),
+            (.setProfileSoul(name: "research", content: "Be direct."), "PUT", "https://hermes.example:9120/api/profiles/research/soul",
+             .object(["content": .string("Be direct.")]), json),
+            (.speak(text: "Hi there.", profile: "research"), "POST", "https://hermes.example:9120/api/audio/speak?profile=research",
+             .object(["text": .string("Hi there.")]), json),
             (.kanbanConfig, "GET", "https://hermes.example:9120/api/plugins/kanban/config", nil, [:]),
             (.kanbanBoards, "GET", "https://hermes.example:9120/api/plugins/kanban/boards", nil, [:]),
             (.kanbanBoard(board: "default", tenant: nil, includeArchived: false), "GET",
@@ -257,6 +360,8 @@ final class HermesRequestTests: XCTestCase {
         XCTAssertThrowsError(try HermesREST.downloadArtifact(path: "a.pdf", profile: "triage", sessionID: "").request(base: base))
         XCTAssertThrowsError(try HermesREST.sessionMessages(key: "../profiles", profile: "triage").request(base: base))
         XCTAssertThrowsError(try HermesREST.sessionMessages(key: "bg_1", profile: "").request(base: base))
+        XCTAssertThrowsError(try HermesREST.speak(text: "Hi.", profile: "").request(base: base))
+        XCTAssertThrowsError(try HermesREST.sessionRow(key: "../profiles", profile: "triage").request(base: base))
         XCTAssertThrowsError(try HermesREST.cronPause(id: "../profiles", profile: "research").request(base: base))
         XCTAssertThrowsError(try HermesREST.cronDelete(id: "", profile: "research").request(base: base))
         XCTAssertThrowsError(try HermesCall.profileModelOptions(profile: "").params())
@@ -264,6 +369,9 @@ final class HermesRequestTests: XCTestCase {
         XCTAssertThrowsError(try HermesREST.kanbanTaskLog(id: "", board: "ops", tailBytes: 1).request(base: base))
         XCTAssertThrowsError(try HermesREST.kanbanUpdateTask(id: "../bulk", board: "ops", body: [:]).request(base: base))
         XCTAssertThrowsError(try HermesREST.kanbanArchiveBoard(slug: "../config").request(base: base))
+        XCTAssertThrowsError(try HermesREST.profileSoul(name: "../config").request(base: base))
+        XCTAssertThrowsError(try HermesREST.setProfileSoul(name: "", content: "x").request(base: base))
+        XCTAssertThrowsError(try HermesREST.config(profile: "").request(base: base))
         let upgrade = try HermesREST.gatewayUpgrade(base: base, ticket: "t1")
         XCTAssertEqual(upgrade.url?.absoluteString, "wss://hermes.example:9120/api/ws")
         XCTAssertEqual(upgrade.allHTTPHeaderFields ?? [:], ["Sec-WebSocket-Protocol": "hermes-gateway-v1, hermes-gateway-ticket.t1"])

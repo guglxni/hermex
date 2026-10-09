@@ -67,8 +67,9 @@ struct SettingsView: View {
     @State private var showDefaultProfilePicker = false
     @State private var notificationPermissionStatus: UNAuthorizationStatus?
     @State private var notificationStatusMessage: String?
-    /// The Hermes server's sign-in username, read once Settings appears (#899).
-    @State private var hermesUsername: String?
+    /// The Hermes server's saved connection, read once Settings appears (#899): its username
+    /// shows in the Active Server card, and Archived Sessions reads through it (#1048).
+    @State private var hermesConnection: BotConnection?
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @AppStorage(AppHaptics.streamingPulseIsEnabledKey) private var isStreamingPulseEnabled = false
@@ -126,10 +127,14 @@ struct SettingsView: View {
                     )
                 }
 
-                if !isHermesServer {
+                if !isHermesServer || hermesConnection != nil {
                     SettingsCard(title: String(localized: "Archived Sessions")) {
                         NavigationLink {
-                            ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                            if isHermesServer, let hermesConnection {
+                                ArchivedSessionsView(server: server, hermes: .saved(hermesConnection, server: server, profile: nil))
+                            } else {
+                                ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                            }
                         } label: {
                             SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
                         }
@@ -761,7 +766,7 @@ struct SettingsView: View {
         .task {
             // A Hermes server has no webui to load from, so no webui 401 can sign it out (#899).
             if isHermesServer {
-                hermesUsername = (try? BotConnectionStore().load(server: server))?.username
+                hermesConnection = try? BotConnectionStore().load(server: server)
             } else {
                 await loadServerSettings()
             }
@@ -913,16 +918,17 @@ struct SettingsView: View {
     /// configures or reads one (#899).
     private var isHermesServer: Bool { authManager.kind(of: server) == .hermes }
 
-    /// A Hermes server's Active Server card: its sign-in, with its headers, and the
-    /// release saved at that sign-in.
+    /// A Hermes server's Active Server card: its sign-in, with its headers, the release saved
+    /// at that sign-in, and the host's update standing (#1075).
     private var hermesServerCard: some View {
-        SettingsCard(title: String(localized: "Active Server")) {
+        let updates = HermesUpdateModel.for(server: server)
+        return SettingsCard(title: String(localized: "Active Server")) {
             NavigationLink {
                 BotConnectionView(server: server) { authManager.hermesSignInSaved(server: server) }
             } label: {
                 SettingsAccessoryRow(
                     title: String(localized: "Hermes connection"),
-                    value: hermesUsername,
+                    value: hermesConnection?.username,
                     systemImage: "person.badge.key"
                 )
             }
@@ -933,8 +939,17 @@ struct SettingsView: View {
                 SettingsInfoRow(title: String(localized: "Version"), value: version)
             }
 
+            HermesUpdateCallout(model: updates, version: activeAccount?.serverVersion)
+
             SettingsFootnote(String(localized: "Sign-in and connection headers for this Hermes host."))
         }
+        .task {
+            updates.onUpdated = { version in
+                authManager.hermesServerUpdated(server: server, to: version)
+            }
+            await updates.appear()
+        }
+        .onDisappear { updates.leaveSettings() }
     }
 
     /// Pushes the current global identity values (which the Identity + Header Logo

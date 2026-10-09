@@ -24,7 +24,9 @@ import OSLog
         /// 120 and 180: installing a plugin clones a repository on the host, and a restart
         /// takes the gateway down and back up. 15 seconds would read as a failure while
         /// the host was still succeeding. A sign-in provisioning starts gets them too, and so
-        /// does a Task's Run Now, which the host answers once the run has finished (#1041).
+        /// does a Task's Run Now, which the host answers once the run has finished (#1041), and
+        /// Listen's speech, whose first request can install the host's TTS engine (#1072), and a
+        /// session export and import, which carry every message (#1048, #1051).
         case provisioning
     }
 
@@ -37,6 +39,13 @@ import OSLog
     /// a control one chat found missing stays off in every chat on it. Recorded by
     /// `gateway`; a new connection starts empty.
     private(set) var unavailableMethods: Set<String> = []
+    /// Every runtime a `session.resume` on this connection reached, or a `session.branch` made
+    /// (#1051), and no `session.close` here ended (#1048), recorded by `gateway`. The host keeps a runtime after its screen leaves,
+    /// and refuses to delete a session any runtime holds, so a delete closes this phone's own
+    /// idle one first. It lasts as long as this connection, past any one socket, as the host's
+    /// runtimes do; one the host has since reaped stays here and is never in
+    /// `session.active_list` again.
+    private(set) var attachedRuntimes: Set<String> = []
     /// The standard-deadline session. The gateway socket opens on it, with its cookies.
     let session: URLSession
     /// Shares `session`'s cookie jar; only its deadlines differ.
@@ -93,6 +102,16 @@ import OSLog
     /// The gateway's report that the host answered `method` with -32601.
     func noteUnavailable(_ method: String) {
         unavailableMethods.insert(method)
+    }
+
+    /// The gateway's report that a `session.resume` reached `runtime`.
+    func noteAttached(_ runtime: String) {
+        attachedRuntimes.insert(runtime)
+    }
+
+    /// The gateway's report that a `session.close` here ended `runtime`.
+    func noteClosed(_ runtime: String) {
+        attachedRuntimes.remove(runtime)
     }
 
     /// Signs in unless this connection already is. Concurrent callers share one attempt,
@@ -165,6 +184,17 @@ import OSLog
         return (try? await publicStatus(on: session)) != nil
     }
 
+    /// The body of one public route the host answers before its auth gate, such as
+    /// `/api/health`, sent with this connection's headers and without signing in. Any status
+    /// but 200 throws `BotFailure.rejected`.
+    func publicData(_ rest: HermesREST) async throws -> Data {
+        try checkCurrent()
+        let data = try await Self.send(prepared(try rest.request(base: connection.address)), on: session,
+                                       accepting: 200..<201, redirectGuard: redirectGuard)
+        try checkCurrent()
+        return data
+    }
+
     /// Sends one signed-in request built from `rest` and returns the body of a reply whose
     /// status is in `accepted`. Any other status throws `BotFailure.rejected`.
     /// `validateDispatch` is as in `authorized`.
@@ -179,11 +209,19 @@ import OSLog
 
     /// Sends one signed-in request built from `rest` and returns its body and status, whatever
     /// the status, for routes whose refusals carry the host's reason (`{detail}`), such as a
-    /// refused cron or Kanban write (#1044). A 401 still signs in again and resends once, as
-    /// `data` does.
-    func reply(_ rest: HermesREST, deadline: Deadline = .standard) async throws -> (body: Data, status: Int) {
+    /// refused cron or Kanban write (#1044) or a session title (#1048). A 401 still signs in
+    /// again and resends once, as `data` does; `validateDispatch` is as in `authorized`.
+    func reply(_ rest: HermesREST, deadline: Deadline = .standard,
+               validateDispatch: (@MainActor () throws -> Void)? = nil) async throws -> (body: Data, status: Int) {
+        try await reply(try rest.request(base: connection.address), deadline: deadline, validateDispatch: validateDispatch)
+    }
+
+    /// `reply` for a request built off the main actor from a `HermesREST` case, such as
+    /// dictation's base64 upload (#1071).
+    func reply(_ request: URLRequest, deadline: Deadline = .standard,
+               validateDispatch: (@MainActor () throws -> Void)? = nil) async throws -> (body: Data, status: Int) {
         let redirectGuard = self.redirectGuard
-        return try await authorized(try rest.request(base: connection.address), deadline: deadline) { request, session in
+        return try await authorized(request, deadline: deadline, validateDispatch: validateDispatch) { request, session in
             let (data, response) = try await Self.exchange(request, on: session, redirectGuard: redirectGuard)
             if response.statusCode == 401 { throw BotFailure.rejected(401) }
             return (data, response.statusCode)
@@ -374,6 +412,14 @@ import OSLog
         current?.liveGateway?.closeForBackground()
     }
 
+    /// Ends `server`'s gateway socket as lost because its dashboard restarted on an update
+    /// (#1075), so every Bot screen on it reconnects now, onto a fresh ticket and handshake,
+    /// rather than on its backoff or its next `.active`. Nothing happens for another server.
+    func reconnectGateway(server: URL) {
+        guard self.server == server.absoluteString else { return }
+        current?.liveGateway?.dropSocket()
+    }
+
     /// Retires `server`'s connection now unless `saved`, its newly saved record, is still
     /// that connection. `AuthManager` calls it when `server` stops being active, and
     /// `BotConnectionStore` when its credentials are saved or removed, so a sign-in in
@@ -384,6 +430,28 @@ import OSLog
         if let saved, current.adopt(saved) { return }
         current.retire()
         self.current = nil
+    }
+}
+
+/// The wait for a Hermes dashboard that went away to restart: push's "Restart Hermes…" (#934)
+/// and an update from Settings (#1075). Whoever starts the restart counts a dropped connection
+/// on that request as the restart having begun. The probe signs in again for the restarted
+/// dashboard's new session key, which `HermesConnection` does on the first 401.
+enum HermesRestartWait {
+    /// Sleeps each of `delays` in turn and then asks `probe`, until `isFinal` holds for its
+    /// answer or the schedule runs out. The last answer stands: the final probe's, which is
+    /// nil when it heard nothing. A cancelled sleep ends the wait with the answer before it.
+    @MainActor static func lastAnswer<Answer>(
+        after delays: [Duration], sleep: @Sendable (Duration) async throws -> Void,
+        probe: () async -> Answer?, isFinal: (Answer) -> Bool
+    ) async -> Answer? {
+        var answer: Answer?
+        for delay in delays {
+            do { try await sleep(delay) } catch { break }
+            answer = await probe()
+            if let answer, isFinal(answer) { break }
+        }
+        return answer
     }
 }
 

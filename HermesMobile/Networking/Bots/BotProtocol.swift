@@ -89,6 +89,24 @@ enum BotFailure: Error, Equatable, LocalizedError {
 /// `URLError`s pass through `BotClient` unwrapped on purpose: reconnect logic reads any
 /// non-`BotFailure` error as transport, so only the copy maps them.
 enum BotConnectionAdvice {
+    /// Whether a screen that lost its connection to `error` should reconnect on its backoff
+    /// (the inbox, the Sessions list). False for a refusal the user has to act on: sign-in,
+    /// an unsupported host or address, an address that now reaches a different host or is not
+    /// a dashboard, an access proxy's own sign-in, a host with browser sign-in only, a refused
+    /// gateway upgrade, a Hermes release older than the minimum, and any other permanent HTTP
+    /// client error (a 404 is not a Hermes host). Server errors, rate limits and JSON-RPC
+    /// faults other than "method missing" are the retry loop's problem.
+    static func isRetryable(_ error: Error) -> Bool {
+        switch error as? BotFailure {
+        case .unsupported, .wrongIdentity, .differentHost, .invalidAddress, .notDashboard,
+             .blocked, .browserSignIn, .upgradeRefused, .outdated: return false
+        case .rejected(-32601), .rejected(4090), .rejected(4130): return false
+        case .rejected(408), .rejected(429): return true
+        case .rejected(let code): return !(400..<500).contains(code)
+        default: return true
+        }
+    }
+
     static func message(for error: Error, address: URL) -> String {
         let host = address.host ?? address.absoluteString
         if let error = error as? URLError {
@@ -153,9 +171,36 @@ enum BotConnectionAdvice {
     /// The Profile the host's dashboard is scoped to (`/api/profiles/active` `current`), the
     /// one a new session runs under.
     func currentProfile() async throws -> String
-    /// A stored session's latest rows under `profile` (`HermesREST.sessionMessages`), or nil
-    /// when the host has no such session (404).
-    func sessionMessages(_ key: String, profile: String) async throws -> [BotJSON]?
+    /// A stored session's rows under `profile` (`HermesREST.sessionMessages`): its latest 500
+    /// without an offset, else one transcript page from `offset` (#1047). Nil when the host has
+    /// no such session (404).
+    func sessionMessages(_ key: String, profile: String, offset: Int?) async throws -> [BotJSON]?
+    /// `text` spoken in `profile`'s voice (`HermesREST.speak`): the audio bytes, of a format the
+    /// host's TTS provider chose. Any refusal or unreadable reply throws.
+    func speech(text: String, profile: String) async throws -> Data
+    /// One page of `profile`'s sessions for the Sessions list, or with `archived` for the
+    /// Archived screen (`HermesREST.sessionList`, #1046, #1048).
+    func sessionPage(profile: String, offset: Int, archived: Bool) async throws -> HermesSessionPage
+    /// Writes one change to a session (`HermesREST.updateSession`, #1046, #1048) and returns the
+    /// title the host keeps. A change the host refuses with its reason, such as a title already
+    /// in use, throws `HermesSessionRefusal`.
+    @discardableResult
+    func updateSession(_ change: HermesSessionChange, key: String, profile: String) async throws -> String?
+    /// The session's row and messages as the host exports them (`HermesREST.sessionExport`, #1048).
+    func exportSession(key: String, profile: String) async throws -> Data
+    /// That exact session's stored row (`HermesREST.sessionRow`, #1051); nil when the host has
+    /// no such session (404).
+    func sessionRow(key: String, profile: String) async throws -> BotJSON?
+    /// Sends one session import, its JSON `body` already encoded (`HermesREST.importSessions`,
+    /// #1051), and returns the host's result. A payload the host refuses throws its reason as
+    /// `HermesSessionRefusal`.
+    func importSessions(body: Data) async throws -> BotJSON
+    /// `profile`'s sessions matching `query`, in the host's order (`HermesREST.sessionSearch`, #1053).
+    func searchSessions(query: String, profile: String) async throws -> [HermesSessionSearchResult]
+    /// The runtimes this phone's screens attached on the connection (`session.resume`) or branched
+    /// (`session.branch`, #1051) and have not closed, so a delete can tell its own from another
+    /// app's (#1048).
+    var attachedRuntimes: Set<String> { get }
     /// Ends this screen's calls, uploads and downloads; the shared socket stays for others.
     func close()
 }
@@ -181,9 +226,44 @@ extension BotTransport {
         throw BotFailure.unsupported
     }
 
-    func sessionMessages(_ key: String, profile: String) async throws -> [BotJSON]? {
+    func sessionMessages(_ key: String, profile: String, offset: Int?) async throws -> [BotJSON]? {
         throw BotFailure.unsupported
     }
+
+    func speech(text: String, profile: String) async throws -> Data {
+        throw BotFailure.unsupported
+    }
+
+    /// A stored session's latest 500 rows, as a background task's result reads them.
+    func sessionMessages(_ key: String, profile: String) async throws -> [BotJSON]? {
+        try await sessionMessages(key, profile: profile, offset: nil)
+    }
+
+    func sessionPage(profile: String, offset: Int, archived: Bool) async throws -> HermesSessionPage {
+        throw BotFailure.unsupported
+    }
+
+    func updateSession(_ change: HermesSessionChange, key: String, profile: String) async throws -> String? {
+        throw BotFailure.unsupported
+    }
+
+    func exportSession(key: String, profile: String) async throws -> Data {
+        throw BotFailure.unsupported
+    }
+
+    func sessionRow(key: String, profile: String) async throws -> BotJSON? {
+        throw BotFailure.unsupported
+    }
+
+    func importSessions(body: Data) async throws -> BotJSON {
+        throw BotFailure.unsupported
+    }
+
+    func searchSessions(query: String, profile: String) async throws -> [HermesSessionSearchResult] {
+        throw BotFailure.unsupported
+    }
+
+    var attachedRuntimes: Set<String> { [] }
 
     func call(_ call: HermesCall) async throws -> BotJSON {
         try await self.call(call, validateDispatch: nil)

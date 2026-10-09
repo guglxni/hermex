@@ -55,8 +55,16 @@ import Observation
         XCTAssertEqual(slash.route("model"), .appOwned(SlashCommandCatalog.hermesCommand(named: "model")!))
         XCTAssertEqual(slash.route("reset"), .appOwned(SlashCommandCatalog.hermesCommand(named: "new")!), "an alias of /new")
         XCTAssertEqual(slash.route("yolo"), .appOwned(SlashCommandCatalog.hermesCommand(named: "yolo")!))
-        XCTAssertEqual(slash.route("undo"), .held)
-        XCTAssertEqual(slash.route("compact"), .held)
+        XCTAssertEqual(slash.route("title"), .appOwned(SlashCommandCatalog.command(named: "title")!), "#1048")
+        XCTAssertEqual(slash.route("undo"), .appOwned(SlashCommandCatalog.command(named: "undo")!), "#1049")
+        XCTAssertEqual(slash.route("retry"), .appOwned(SlashCommandCatalog.command(named: "retry")!), "#1049")
+        XCTAssertEqual(slash.route("compress"), .appOwned(SlashCommandCatalog.command(named: "compress")!), "#1050")
+        XCTAssertEqual(slash.route("compact"), .appOwned(SlashCommandCatalog.command(named: "compact")!), "#1050")
+        XCTAssertEqual(slash.route("clear").appOwnedHandler, .clientSide(.clear), "#1050")
+        XCTAssertEqual(slash.route("sessions").appOwnedName, "sessions", "#1053")
+        XCTAssertEqual(slash.route("resume").appOwnedName, "resume", "#1053")
+        XCTAssertEqual(slash.route("branch"), .appOwned(SlashCommandCatalog.command(named: "branch")!), "#1051")
+        XCTAssertEqual(slash.route("fork"), .appOwned(SlashCommandCatalog.command(named: "fork")!), "#1051")
         XCTAssertEqual(slash.route("demo-skill").isSkill, true)
         XCTAssertEqual(slash.route("context"), .host)
         XCTAssertEqual(slash.route("ctx"), .host)
@@ -78,12 +86,31 @@ import Observation
         XCTAssertEqual(chat.model.messages.map(\.content), ["```text\nhermex-quick\n```"])
     }
 
-    func testAHeldCommandShowsTheNoticeAndSendsNothing() async {
+    /// `/title` renames the session on its runtime (#1048), never through `slash.exec`, and the
+    /// header takes the title the host kept.
+    func testTitleRenamesTheSessionOnItsRuntime() async {
         let chat = await openChat()
-        let result = await chat.model.runHermesSlashCommand("/undo")
-        XCTAssertEqual(result, .unsupported(friendlyMessage: "Hermex can't run /undo in a Hermes chat yet (#702)."))
+        chat.host.always("session.title", .init(result: .object(["pending": .bool(false), "title": .string("Launch plan")])))
+
+        let result = await chat.model.runHermesSlashCommand("/title  Launch plan ")
+
+        XCTAssertEqual(result, .executed(message: "Title set to **Launch plan**."))
+        XCTAssertEqual(chat.writes("session.title"), [["session_id": .string("runtime"), "title": .string("Launch plan")]])
         XCTAssertEqual(chat.writes("slash.exec"), [])
-        XCTAssertEqual(chat.writes("prompt.submit"), [])
+        XCTAssertEqual(chat.model.displayTitle, "Launch plan")
+    }
+
+    /// A title the host refuses (4022: in use, or over 100 characters) shows its words and keeps
+    /// the draft.
+    func testATitleTheHostRefusesShowsItsMessage() async {
+        let chat = await openChat()
+        let refusal = "Title 'Plan' is already in use by session 20261007_003046_925526"
+        chat.host.always("session.title", .init(error: 4022, message: refusal))
+
+        let result = await chat.model.runHermesSlashCommand("/title Plan")
+
+        XCTAssertEqual(result, .notDelivered)
+        XCTAssertEqual(chat.model.sendErrorMessage, refusal)
     }
 
     func testAnUnknownNameIsSentAsText() async {
@@ -117,6 +144,50 @@ import Observation
             return XCTFail("Expected a new chat")
         }
         XCTAssertEqual(opened.target, .new(profile: "default"))
+    }
+
+    // MARK: Sessions (#1053)
+
+    /// `/resume <name>` searches the chat's Profile for the name and opens the one session
+    /// titled exactly that, in any case; a title that only starts with it doesn't count.
+    func testResumeOpensTheOneSessionTitledExactlyThat() async throws {
+        let chat = await openChat(search: [Self.searchResult("20261007_090000_aaaaaa", title: "Launch plan"),
+                                           Self.searchResult("20261007_090000_bbbbbb", title: "Launch plan draft")])
+
+        let result = await chat.model.runHermesSlashCommand("/resume launch PLAN")
+
+        guard case .openedHermesSession(let opened)? = result else {
+            return XCTFail("Expected the session titled Launch plan, got \(String(describing: result))")
+        }
+        XCTAssertEqual(opened.target, .session(profile: "default", key: "20261007_090000_aaaaaa"))
+        let searches = HermesHostFixture.requests.filter { $0.url?.path == "/api/sessions/search" }
+        XCTAssertEqual(searches.count, 1)
+        let query = try XCTUnwrap(searches.first?.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems)
+        XCTAssertEqual(query.first { $0.name == "q" }?.value, "launch PLAN")
+        XCTAssertEqual(query.first { $0.name == "profile" }?.value, "default")
+        XCTAssertEqual(chat.writes("slash.exec"), [], "the host's own /resume never runs")
+    }
+
+    /// Anything but one exact title (none, two in different cases, or a Bot Chat, which opens
+    /// in its bot) opens the Profile's Sessions list searching the name; `/sessions` and a bare
+    /// `/resume` open it unsearched. The host's own commands never run.
+    func testResumeWithoutOneExactTitleOpensTheListSearchingIt() async {
+        let chat = await openChat(search: [Self.searchResult("a", title: "Launch plan"), Self.searchResult("b", title: "launch PLAN"),
+                                           Self.searchResult("c", title: "Bot Chat")])
+        let lines = [("/resume launch", "launch"), ("/resume Launch plan", "Launch plan"), ("/resume Bot Chat", "Bot Chat"),
+                     ("/resume", ""), ("/sessions", "")]
+        for (line, query) in lines {
+            let result = await chat.model.runHermesSlashCommand(line)
+            guard case .openedHermesSessionList(let entry)? = result else {
+                XCTFail("\(line): expected the Sessions list, got \(String(describing: result))")
+                continue
+            }
+            XCTAssertEqual(entry.query, query, line)
+            XCTAssertEqual(entry.profile, "default", line)
+            XCTAssertEqual(entry.connection, Self.connection, line)
+        }
+        XCTAssertEqual(HermesHostFixture.count("/api/sessions/search"), 3, "only a named /resume searches")
+        XCTAssertEqual(chat.writes("slash.exec"), [])
     }
 
     /// A chat that is not attached sends nothing and keeps the draft.
@@ -177,7 +248,7 @@ import Observation
         let refusal = try Self.fixture("slash.exec /steer")
         let reply = BotSocketHost.Reply(error: refusal["code"].integer, message: refusal["message"].text ?? "")
 
-        let sent = await openChat(messages: [.object(["role": .string("user"), "text": .string("hi"), "content": .string("hi")])])
+        let sent = await openChat(messages: [.object(["id": .number(1), "role": .string("user"), "content": .string("hi")])])
         XCTAssertEqual(sent.model.messages.map(\.role), ["user"])
         sent.host.always("slash.exec", reply)
         let refused = await sent.model.runHermesSlashCommand("/steer")
@@ -266,20 +337,35 @@ import Observation
         }
     }
 
-    /// A Hermes chat attached to an idle session on `runtime`, holding `messages`, with the
+    /// One `GET /api/sessions/search` id match in the pin's shape (#1053).
+    private static func searchResult(_ id: String, title: String) -> BotJSON {
+        .object(["snippet": .string("Session ID: \(id)"), "role": .null, "session_id": .string(id), "id": .string(id),
+                 "lineage_root": .string(id), "profile": .string("default"), "title": .string(title),
+                 "last_active": .number(1_791_400_927), "started_at": .number(1_791_400_926), "archived": .bool(false)])
+    }
+
+    /// A Hermes chat attached to an idle session on `runtime`, whose transcript page holds
+    /// `messages` (#1047) and whose Profile's search answers `search` (#1053), with the
     /// recorded catalog read unless `catalog` is false.
-    private func openChat(messages: [BotJSON] = [], catalog: Bool = true) async -> Chat {
+    private func openChat(messages: [BotJSON] = [], search: [BotJSON] = [], catalog: Bool = true) async -> Chat {
         addTeardownBlock { HermesHostFixture.reset() }
         let host = BotSocketHost()
         host.always("session.resume", .init(result: .object([
             "session_id": .string("runtime"), "session_key": .string("tip"), "running": .bool(false),
-            "messages": .array(messages), "info": .object(["profile_name": .string("default")])
+            "messages": .array([]), "info": .object(["profile_name": .string("default")])
         ])))
         host.always("session.events.since", .init(result: BotFixtureWire.replay(latest: 0)))
         if catalog, let reply = try? Self.fixture("commands.catalog") {
             host.always("commands.catalog", .init(result: reply))
         }
         let client = BotClient(http: host.connection(Self.connection))
+        _ = HermesHostFixture.configuration { request in
+            switch request.url?.path {
+            case "/api/sessions/tip/messages": return .json(200, .object(["messages": .array(messages)]))
+            case "/api/sessions/search": return .json(200, .object(["results": .array(search)]))
+            default: return nil
+            }
+        }
         let engine = HermesConversation(server: URL(string: "https://hermes.example")!, connection: Self.connection,
                                         target: .session(profile: "default", key: "tip"), wire: client)
         let turn = HermesChatTurnCoordinator(engine: engine, isNetworkAvailable: { true })
@@ -310,4 +396,8 @@ import Observation
 
 private extension HermesSlashRoute {
     var isSkill: Bool { if case .skill = self { return true }; return false }
+    /// The handler of an app-owned command; nil for any other route.
+    var appOwnedHandler: SlashCommandHandler? { if case .appOwned(let command) = self { return command.handler }; return nil }
+    /// The name of an app-owned command; nil for any other route.
+    var appOwnedName: String? { if case .appOwned(let command) = self { return command.name }; return nil }
 }

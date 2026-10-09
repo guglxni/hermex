@@ -297,9 +297,18 @@ struct ChatView: View {
     /// A Hermes session's chat (#1010): webui-only controls are hidden and its turns run
     /// on the gateway socket.
     let isHermesSession: Bool
+    /// The parent the row this Hermes chat opened from named, which its "Forked from" row
+    /// checks (#1051).
+    let hermesParentKey: String?
     /// Puts a new Hermes chat in this one's place: a Profile picked before anything was
     /// sent (#1015). Nil pushes it on top instead.
     let onReplaceHermesSession: ((HermesSessionChat) -> Void)?
+    /// A Hermes session's dictation goes to its host for its Profile (#1071).
+    private let hermesTranscriber: ComposerTranscriber?
+    /// Returns to the Sessions list under this Hermes chat, in the entry's Profile (this chat's)
+    /// and searching the query `/sessions` or `/resume` named (#1053). Nil pushes a list on top
+    /// instead.
+    let onOpenHermesSessions: ((HermesSessionListEntry) -> Void)?
 
     /// The composer's draft. Never read it in `body` or wrap it in a get/set
     /// binding for the composer: either re-runs this whole screen on every
@@ -329,7 +338,10 @@ struct ChatView: View {
     @State private var pushedSession: SessionSummary?
     /// A new Hermes chat in another Profile, pushed on top so Back returns here (#1015).
     @State private var pushedHermesSession: HermesSessionChat?
-    /// Set when this chat is a fork; draws the "Forked from" row.
+    /// The Sessions list `/sessions` or `/resume` pushed when no list is under this chat (#1053).
+    @State private var pushedHermesSessionList: HermesSessionListEntry?
+    /// Set when this webui chat is a fork; draws the "Forked from" row. A Hermes chat's is
+    /// its view model's (`shownForkOrigin`).
     @State private var forkOrigin: ForkOrigin?
     @State private var isOpeningForkParent = false
     @State private var editContext: MessageActionContext?
@@ -425,7 +437,8 @@ struct ChatView: View {
         restoresDraftSettings: Bool = false,
         onConversationStarted: @escaping () -> Void = {},
         hermesSession: HermesSessionChat? = nil,
-        onReplaceHermesSession: ((HermesSessionChat) -> Void)? = nil
+        onReplaceHermesSession: ((HermesSessionChat) -> Void)? = nil,
+        onOpenHermesSessions: ((HermesSessionListEntry) -> Void)? = nil
     ) {
         self.session = session
         self.server = server
@@ -438,7 +451,10 @@ struct ChatView: View {
         self.restoresDraftSettings = restoresDraftSettings
         self.onConversationStarted = onConversationStarted
         isHermesSession = hermesSession != nil
+        hermesParentKey = hermesSession?.parentKey
         self.onReplaceHermesSession = onReplaceHermesSession
+        hermesTranscriber = hermesSession.map { HermesTranscription.transcriber(for: $0) }
+        self.onOpenHermesSessions = onOpenHermesSessions
         _draftMessage = State(initialValue: initialDraft)
         _draftQuotes = State(initialValue: initialQuotes)
         _initialAttachments = State(initialValue: initialAttachments)
@@ -462,13 +478,15 @@ struct ChatView: View {
 
     /// A Hermes session on its Profile (#1010). It has no webui session, so nothing here
     /// reaches the webui API; connection errors show in the chat itself.
-    init(hermesSession: HermesSessionChat, onReplace: ((HermesSessionChat) -> Void)? = nil) {
+    init(hermesSession: HermesSessionChat, onReplace: ((HermesSessionChat) -> Void)? = nil,
+         onOpenSessions: ((HermesSessionListEntry) -> Void)? = nil) {
         self.init(
             session: SessionSummary(profile: hermesSession.target.profile),
             server: hermesSession.server,
             onAPIError: { _ in },
             hermesSession: hermesSession,
-            onReplaceHermesSession: onReplace
+            onReplaceHermesSession: onReplace,
+            onOpenHermesSessions: onOpenSessions
         )
     }
 
@@ -487,7 +505,8 @@ struct ChatView: View {
                 }
             ),
             // A Hermes prompt whose answer was lost holds Send until the chat reattaches (#508).
-            isSending: viewModel.isStartingChat || viewModel.isSendingVoiceNote || viewModel.isHermesSubmissionUncertain,
+            isSending: viewModel.isStartingChat || viewModel.isSendingVoiceNote || viewModel.isHermesSubmissionUncertain
+                || viewModel.isUndoingExchange,
             isCompressingSession: viewModel.isCompressingSession,
             isWaitingForStream: viewModel.activeStreamID != nil,
             isCancellingStream: viewModel.isCancellingStream,
@@ -659,7 +678,8 @@ struct ChatView: View {
             configurationNotice: viewModel.composerConfigurationNotice,
             sentReasoningEffort: viewModel.composerSentReasoningEffort,
             uploadsAttachmentsOnSend: isHermesSession,
-            onCancelAttachmentUpload: viewModel.isSendingAttachments ? { viewModel.cancelAttachmentUpload() } : nil
+            onCancelAttachmentUpload: viewModel.isSendingAttachments ? { viewModel.cancelAttachmentUpload() } : nil,
+            hermesTranscriber: hermesTranscriber
         )
         // The composer flips wholesale with the transcript under the RTL
         // toggle (#259): input, placeholder, and chrome mirror together.
@@ -1028,7 +1048,11 @@ struct ChatView: View {
                 ChatView(session: session, server: server, onAPIError: onAPIError)
             }
             .navigationDestination(item: $pushedHermesSession) { chat in
-                ChatView(hermesSession: chat) { pushedHermesSession = $0 }.id(chat.id)
+                ChatView(hermesSession: chat, onReplace: { pushedHermesSession = $0 }, onOpenSessions: onOpenHermesSessions)
+                    .id(chat.id)
+            }
+            .navigationDestination(item: $pushedHermesSessionList) { entry in
+                HermesSessionListView(entry: entry).id(entry.id)
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
@@ -1823,7 +1847,7 @@ struct ChatView: View {
             onOpenTurnFileDiff: { file in
                 turnDiffPresentation = .turnFiles(turnChangesRecapSummary?.diffFiles ?? [file], initial: file)
             },
-            forkOrigin: forkOrigin,
+            forkOrigin: shownForkOrigin,
             onOpenForkParent: openForkParent
         )
         // Off the main body chain, which is at the type-checker's limit.
@@ -1831,7 +1855,7 @@ struct ChatView: View {
             handleLatestRunOutcomeChange(viewModel.latestRunOutcome)
         }
         .task(id: session.sessionId) {
-            resolveForkOrigin()
+            await resolveForkOrigin()
         }
         .onChange(of: viewModel.messages.isEmpty, initial: true) { _, isEmpty in
             if !isEmpty { endSessionOpenSignpost() }
@@ -2513,6 +2537,23 @@ struct ChatView: View {
                     submittedDraftRevision: submittedDraftRevision
                 )
             }
+        case .replacedHermesSession(let chat):
+            // The command leaves this chat's draft first; anything else in it stays here.
+            if consumesDraft {
+                reconcileConsumedDraft(
+                    ComposerDraftContent(text: submittedDraft, quotes: submittedQuotes),
+                    submittedDraftRevision: submittedDraftRevision
+                )
+            }
+            if let onReplaceHermesSession { onReplaceHermesSession(chat) } else { pushedHermesSession = chat }
+        case .openedHermesSessionList(let entry):
+            if consumesDraft {
+                reconcileConsumedDraft(
+                    ComposerDraftContent(text: submittedDraft, quotes: submittedQuotes),
+                    submittedDraftRevision: submittedDraftRevision
+                )
+            }
+            if let onOpenHermesSessions { onOpenHermesSessions(entry) } else { pushedHermesSessionList = entry }
         case .prefill(let text):
             // Unless the user typed on meanwhile: their edit wins.
             if draftRevision == submittedDraftRevision {
@@ -2841,6 +2882,10 @@ struct ChatView: View {
     }
 
     private func forkFromMessage(_ context: MessageActionContext) async {
+        if isHermesSession {
+            if let branch = await viewModel.forkHermesSession(from: context) { pushedHermesSession = branch }
+            return
+        }
         let session = await viewModel.forkFromMessage(context, modelContext: modelContext)
 
         if let lastError = viewModel.lastError {
@@ -2852,9 +2897,20 @@ struct ChatView: View {
         }
     }
 
+    /// The "Forked from" row this chat draws. A Hermes branch's comes from its host, which the
+    /// view model asks again on a later connect when the first attach failed (#1051).
+    private var shownForkOrigin: ForkOrigin? {
+        isHermesSession ? viewModel.hermesForkOrigin : forkOrigin
+    }
+
     /// Reads the parent's title from the active server's session cache, which
-    /// the session list writes on every load. Only forks do the lookup.
-    private func resolveForkOrigin() {
+    /// the session list writes on every load. Only forks do the lookup. A Hermes
+    /// branch asks its host instead (#1051).
+    private func resolveForkOrigin() async {
+        if isHermesSession {
+            await viewModel.checkHermesForkParent(hermesParentKey)
+            return
+        }
         guard let parentID = ForkOrigin.parentSessionID(of: session) else {
             forkOrigin = nil
             return
@@ -2866,7 +2922,11 @@ struct ChatView: View {
     /// Pushes the fork's parent: the cached one at once, otherwise after
     /// fetching it. A failed fetch shows the message-action error and stays here.
     private func openForkParent() {
-        guard let forkOrigin, !isOpeningForkParent else { return }
+        guard let forkOrigin = shownForkOrigin, !isOpeningForkParent else { return }
+        if isHermesSession {
+            pushedHermesSession = forkOrigin.parent.flatMap(viewModel.hermesChat(opening:))
+            return
+        }
         if let parent = forkOrigin.parent {
             pushedSession = parent
             return
@@ -3602,6 +3662,10 @@ struct ChatView: View {
         if success {
             editDraft = ""
         }
+        if let unsent = viewModel.takeUnsentHermesEdit() {
+            restoreUnsentEdit(unsent)
+            editDraft = ""
+        }
 
         if let lastError = viewModel.lastError {
             onAPIError(lastError)
@@ -3629,16 +3693,30 @@ struct ChatView: View {
         }
     }
 
+    /// Puts a Hermes edit that did not go through back in the composer (#1049), after any draft
+    /// already there, so neither is lost.
+    private func restoreUnsentEdit(_ text: String) {
+        let draft = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : "\(draftMessage)\n\n\(text)"
+        draftMessage = draft
+        persistDraftEdit(draft)
+    }
+
     private var editDiscardWarningMessage: String {
         guard let context = editContext else { return "" }
         let messagesAfter = transcriptMessagesAfter(context)
-        return String(localized: "Editing this message will discard \(messagesAfter) later messages.")
+        return withHermesCutNote(String(localized: "Editing this message will discard \(messagesAfter) later messages."))
     }
 
     private var regenerateDiscardWarningMessage: String {
         guard let context = regenerateContext else { return "" }
         let messagesAfter = transcriptMessagesAfter(context)
-        return String(localized: "Regenerating this response will discard \(messagesAfter) later messages.")
+        return withHermesCutNote(String(localized: "Regenerating this response will discard \(messagesAfter) later messages."))
+    }
+
+    /// A Hermes host's cut is permanent and every app sees it (#1049), so its warning says so.
+    private func withHermesCutNote(_ warning: String) -> String {
+        guard isHermesSession else { return warning }
+        return warning + "\n\n" + String(localized: "The Hermes host removes them for every app. It can't be undone.")
     }
 
     private var profileSwitchWarningMessage: String {
@@ -3650,11 +3728,7 @@ struct ChatView: View {
     }
 
     private func transcriptMessagesAfter(_ context: MessageActionContext) -> Int {
-        guard let index = transcriptMessages.firstIndex(where: { $0.id == context.messageID }) else {
-            return 0
-        }
-
-        return max(0, transcriptMessages.count - 1 - index)
+        viewModel.transcriptMessagesAfter(context)
     }
 }
 
@@ -3865,7 +3939,7 @@ private enum PastedFileError: LocalizedError {
 private extension SlashCommandExecutionResult {
     var isSuccessfulSubmission: Bool {
         switch self {
-        case .executed, .openedSession, .openedHermesSession:
+        case .executed, .openedSession, .openedHermesSession, .replacedHermesSession, .openedHermesSessionList:
             true
         case .sendAsMessage, .unsupported, .needsSubArg, .notDelivered, .prefill:
             false

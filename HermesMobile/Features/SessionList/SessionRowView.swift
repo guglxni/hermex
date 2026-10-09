@@ -17,6 +17,11 @@ struct SessionRowView: View {
     /// Set only while a remote content search is showing this row, so the row
     /// can say why it matched.
     var searchExcerpt: SessionSearchExcerpt?
+    /// Labels an archived row "Archived": set on the Sessions list, where only a Hermes search
+    /// shows one (#1053), and not on the Archived screen, whose rows all are.
+    var labelsArchived = false
+    /// The Profile the row belongs to, tagged on a Hermes list of every Profile's sessions (#709).
+    var profileTag: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -38,12 +43,12 @@ struct SessionRowView: View {
         .accessibilityLabel(accessibilitySummary)
     }
 
+    /// The row's title; an untitled Hermes row shows its first prompt (`preview`, #1046).
     static func displayTitle(for session: SessionSummary) -> String {
-        let title = session.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let title, !title.isEmpty else {
-            return String(localized: "Untitled Session")
-        }
-        return title
+        let title = [session.title, session.hermes?.preview]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        return title ?? String(localized: "Untitled Session")
     }
 
     static func isActiveStreaming(_ session: SessionSummary) -> Bool {
@@ -92,7 +97,8 @@ struct SessionRowView: View {
         for session: SessionSummary,
         isViewingCachedData: Bool,
         attentionState: SessionRowAttentionState? = nil,
-        isUnread: Bool = false
+        isUnread: Bool = false,
+        labelsArchived: Bool = false
     ) -> [String] {
         var labels: [String] = []
 
@@ -120,6 +126,10 @@ struct SessionRowView: View {
 
         if session.isSessionReadOnly {
             labels.append(String(localized: "Read-only"))
+        }
+
+        if labelsArchived && session.archived == true {
+            labels.append(String(localized: "Archived"))
         }
 
         return labels
@@ -275,6 +285,10 @@ struct SessionRowView: View {
         if dynamicTypeSize.isAccessibilitySize {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
+                    if let profileTag {
+                        SessionProfileTag(profile: profileTag)
+                    }
+
                     if !visibleStateBadges.isEmpty {
                         stateBadgesRow
                     }
@@ -292,6 +306,10 @@ struct SessionRowView: View {
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
+                if let profileTag {
+                    SessionProfileTag(profile: profileTag)
+                }
+
                 if !visibleStateBadges.isEmpty {
                     stateBadgesRow
                 }
@@ -338,6 +356,10 @@ struct SessionRowView: View {
             badges.append(.readOnly)
         }
 
+        if labelsArchived && session.archived == true {
+            badges.append(.archived)
+        }
+
         return badges
     }
 
@@ -346,7 +368,7 @@ struct SessionRowView: View {
     }
 
     private var showsSupplementalContent: Bool {
-        metadataLabel != nil || showsStateBadges
+        metadataLabel != nil || showsStateBadges || profileTag != nil
     }
 
     private var rowContentSpacing: CGFloat {
@@ -395,11 +417,16 @@ struct SessionRowView: View {
             parts.append(String(localized: "Matched: \(searchExcerpt.text)"))
         }
 
+        if let profileTag {
+            parts.append(String(localized: "Profile: \(profileTag)"))
+        }
+
         parts.append(contentsOf: Self.accessibilityStateLabels(
             for: session,
             isViewingCachedData: isViewingCachedData,
             attentionState: attentionState,
-            isUnread: isUnread
+            isUnread: isUnread,
+            labelsArchived: labelsArchived
         ))
 
         if let metadataLabel {
@@ -480,6 +507,7 @@ enum SessionRowAttentionState: String, Equatable {
 private enum SessionRowStateBadgeKind: String, Identifiable {
     case cached
     case readOnly
+    case archived
 
     var id: String { rawValue }
 
@@ -489,6 +517,8 @@ private enum SessionRowStateBadgeKind: String, Identifiable {
             return String(localized: "Cached")
         case .readOnly:
             return String(localized: "Read-only")
+        case .archived:
+            return String(localized: "Archived")
         }
     }
 
@@ -496,7 +526,7 @@ private enum SessionRowStateBadgeKind: String, Identifiable {
         switch self {
         case .cached:
             return .orange
-        case .readOnly:
+        case .readOnly, .archived:
             return .gray
         }
     }
@@ -512,6 +542,23 @@ private struct SessionSourceBadge: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .accessibilityHidden(true)
+    }
+}
+
+/// A row's Profile on a list of every Profile's sessions (#709). A Profile name is the user's own
+/// text, never a catalog key.
+private struct SessionProfileTag: View {
+    let profile: String
+
+    var body: some View {
+        Text(verbatim: profile)
+            .font(AppFont.caption2(weight: .semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.12), in: Capsule())
             .accessibilityHidden(true)
     }
 }
