@@ -192,6 +192,26 @@ import UniformTypeIdentifiers
         #expect(snapshot.entries.map(\.displayName.rawValue) == ["Alpha", "Beta"])
         #expect(snapshot.entries[0].scope.server == ServerID.derived(from: "https://alpha.example"))
         #expect(Set(snapshot.entries.map(\.scope.server)).count == 2)
+        #expect(snapshot.entries.allSatisfy { $0.writesUnsupported == nil })
+    }
+
+    @Test func hermesRegistryMarksWritesUnsupportedAndWebuiDoesNot() async throws {
+        let backend = ScriptedBackend(
+            accounts: [
+                WatchPhoneServerAccount(
+                    urlString: "https://hermes.example",
+                    displayName: "Hermes",
+                    writesUnsupported: true
+                ),
+                WatchPhoneServerAccount(urlString: "https://webui.example", displayName: "Web"),
+            ],
+            sessions: []
+        )
+        let snapshot = await makeBroker(backend).registry()
+
+        #expect(snapshot.entries.map(\.displayName.rawValue) == ["Hermes", "Web"])
+        #expect(snapshot.entries[0].writesUnsupported == true)
+        #expect(snapshot.entries[1].writesUnsupported == nil)
     }
 
     @Test func sendStartsARunOnTheScopedServer() async throws {

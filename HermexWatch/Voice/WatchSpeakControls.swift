@@ -38,7 +38,22 @@ struct WatchSpeakControls: View {
         }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
+            guard model.offersReplyControls else {
+                photoItem = nil
+                return
+            }
             Task { await sendPickedPhoto(item) }
+        }
+        .onChange(of: model.offersReplyControls) { _, allowed in
+            guard !allowed else { return }
+            voiceAttempt = nil
+            photoItem = nil
+            if capture.phase == .recording {
+                recorder.cancel()
+                capture.cancel()
+            } else if isFailed {
+                capture.markIdle()
+            }
         }
         .onChange(of: recorder.elapsed) { _, elapsed in
             if capture.phase == .recording, elapsed >= WatchVoiceCapturePolicy.maximumDuration {
@@ -92,7 +107,7 @@ struct WatchSpeakControls: View {
             // Above the controls, not below them: a caption under the icon row
             // falls off a 46mm screen, which is how a failed send came to look
             // like a permanent banner with no cause next to it.
-            if case .failed(let code) = capture.phase {
+            if model.offersReplyControls, case .failed(let code) = capture.phase {
                 Label(failureCopy(code), systemImage: "exclamationmark.circle")
                     .font(.caption2)
                     .foregroundStyle(.red)
@@ -100,15 +115,19 @@ struct WatchSpeakControls: View {
                     .accessibilityLabel("Reply failed. \(failureCopy(code))")
             }
 
-            switch capture.phase {
-            case .recording:
-                recordingPanel
-            case .transcribing:
-                progressRow("Transcribing…")
-            case .sending:
-                progressRow("Sending…")
-            case .idle, .failed:
-                composer
+            if model.offersReplyControls {
+                switch capture.phase {
+                case .recording:
+                    recordingPanel
+                case .transcribing:
+                    progressRow("Transcribing…")
+                case .sending:
+                    progressRow("Sending…")
+                case .idle, .failed:
+                    composer
+                }
+            } else {
+                readOnlyReply
             }
         }
         .frame(maxWidth: .infinity)
@@ -167,20 +186,35 @@ struct WatchSpeakControls: View {
                 .disabled(isSendingPhoto || !model.canMutate)
                 .accessibilityLabel(isSendingPhoto ? "Sending photo" : "Send a photo")
 
-                // Always shown so the row keeps three equal buttons; disabled
-                // rather than hidden when the latest turn has nothing to read.
-                iconButton(
-                    systemImage: speaker.isSpeaking ? "stop.fill" : "speaker.wave.2.fill",
-                    accessibilityLabel: speaker.isSpeaking ? "Stop reading" : "Read reply aloud",
-                    hint: speaker.isSpeaking
-                        ? "Stops reading the reply."
-                        : (listenText == nil ? "No reply to read yet." : "Reads Hermes’s latest reply in this session.")
-                ) {
-                    toggleReadAloud()
-                }
-                .disabled(listenText == nil && !speaker.isSpeaking)
+                listenButton
             }
         }
+    }
+
+    /// Hermes keeps the reply on iPhone. Read aloud still runs on the watch.
+    private var readOnlyReply: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Replies stay on iPhone.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("Replies stay on iPhone for this server.")
+            listenButton
+        }
+    }
+
+    /// Disabled rather than hidden when the latest turn has nothing to read.
+    private var listenButton: some View {
+        iconButton(
+            systemImage: speaker.isSpeaking ? "stop.fill" : "speaker.wave.2.fill",
+            accessibilityLabel: speaker.isSpeaking ? "Stop reading" : "Read reply aloud",
+            hint: speaker.isSpeaking
+                ? "Stops reading the reply."
+                : (listenText == nil ? "No reply to read yet." : "Reads Hermes’s latest reply in this session.")
+        ) {
+            toggleReadAloud()
+        }
+        .disabled(listenText == nil && !speaker.isSpeaking)
     }
 
     private func toggleReadAloud() {
@@ -340,11 +374,16 @@ struct WatchSpeakControls: View {
     /// A complication tap lands here. The recording panel replaces the
     /// controls, so Send is not the thing the tap itself does.
     private func startFromComplication() async {
+        guard model.offersReplyControls else {
+            _ = model.consumeComplicationRecording()
+            return
+        }
         guard model.consumeComplicationRecording() else { return }
         await startVoice()
     }
 
     private func startVoice() async {
+        guard model.offersReplyControls else { return }
         guard WatchVoiceStartGate.shouldAcceptNewAttempt(startInFlight: voiceStartInFlight) else { return }
         guard capture.phase == .idle || isFailed else { return }
         voiceStartInFlight = true
@@ -397,6 +436,11 @@ struct WatchSpeakControls: View {
     }
 
     private func transcribeAndSend(clip: WatchVoiceNoteRecorder.Clip) async {
+        guard model.offersReplyControls else {
+            try? FileManager.default.removeItem(at: clip.url)
+            capture.markIdle()
+            return
+        }
         do {
             let data = try Data(contentsOf: clip.url)
             try? FileManager.default.removeItem(at: clip.url)
@@ -423,6 +467,7 @@ struct WatchSpeakControls: View {
     // MARK: Text and photo
 
     private func send(_ rawText: String) async {
+        guard model.offersReplyControls else { return }
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSendingText else { return }
         isSendingText = true
@@ -440,6 +485,7 @@ struct WatchSpeakControls: View {
     }
 
     private func sendPickedPhoto(_ item: PhotosPickerItem) async {
+        guard model.offersReplyControls else { return }
         isSendingPhoto = true
         defer {
             isSendingPhoto = false

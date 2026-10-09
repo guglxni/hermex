@@ -323,6 +323,8 @@ final class WatchHermesRouteTests: XCTestCase {
         XCTAssertFalse(WatchHermesRoute.togglesSkills(on: .hermes))
         XCTAssertTrue(WatchHermesRoute.remembersProfileLocally(.hermes))
         XCTAssertFalse(WatchHermesRoute.remembersProfileLocally(.webui))
+        XCTAssertTrue(WatchHermesRoute.writesUnsupported(.hermes))
+        XCTAssertFalse(WatchHermesRoute.writesUnsupported(.webui))
     }
 
     func testHermesProfileSwitchIsRememberedLocally() throws {

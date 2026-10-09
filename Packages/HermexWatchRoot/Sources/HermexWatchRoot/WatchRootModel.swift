@@ -118,8 +118,13 @@ public final class WatchRootModel {
 
     /// A tap that already knows Now has no session must not start the
     /// microphone when a session appears later. A tap during the first load
-    /// waits until that load says whether a session exists.
+    /// waits until that load says whether a session exists. A server that
+    /// cannot take a watch reply never starts the microphone.
     public func discardUnusableComplicationRecording() {
+        if !offersReplyControls {
+            complicationRecordID = nil
+            return
+        }
         guard hasLoadedSessions, nowSession == nil else { return }
         complicationRecordID = nil
     }
@@ -246,10 +251,6 @@ public final class WatchRootModel {
 
     public func loadSessions() async {
         guard let link, let scope = selectedScope else { return }
-        defer {
-            hasLoadedSessions = true
-            discardUnusableComplicationRecording()
-        }
         do {
             let snapshot = try await link.makeService().refreshSessions(
                 scope: scope,
@@ -257,6 +258,9 @@ public final class WatchRootModel {
                 query: nil,
                 localLimit: 100
             )
+            // A refresh started for a server the wrist has already left must
+            // not replace the new rows or clear Stop runs that belong to them.
+            guard selectedScope == scope else { return }
             sessions = snapshot.value.items.filter { $0.key.scope == scope }
             dropRunsTheServerNoLongerReports()
             lastErrorCode = nil
@@ -265,6 +269,7 @@ public final class WatchRootModel {
             if state == .signedOut { state = .ready }
             await refreshNowPreview()
         } catch WatchCompanionError.backend(.authRequired) {
+            guard selectedScope == scope else { return }
             // The iPhone's session for this server is gone. The watch cannot
             // sign in, so present the truthful state instead of an empty ready
             // surface and disable mutations.
@@ -275,8 +280,12 @@ public final class WatchRootModel {
             activeRunBySession = [:]
             lastErrorCode = "authRequired"
         } catch {
+            guard selectedScope == scope else { return }
             lastErrorCode = "sessionsUnavailable"
         }
+        guard selectedScope == scope else { return }
+        hasLoadedSessions = true
+        discardUnusableComplicationRecording()
     }
 
     public func loadComposerOptions() async -> WatchComposerOptions? {
@@ -768,6 +777,7 @@ public final class WatchRootModel {
     }
 
     public func sendPhoto(image: Data, filename: String, caption: String, to key: SessionKey) async -> RunKey? {
+        guard offersReplyControls else { return nil }
         guard canMutate, let link, let scope = selectedScope else { return nil }
         let revision = await refreshRevision(using: link.makeService())
         do {
@@ -818,6 +828,7 @@ public final class WatchRootModel {
     }
 
     public func sendVoiceNote(audio: Data, filename: String, to key: SessionKey) async -> RunKey? {
+        guard offersReplyControls else { return nil }
         guard canMutate, let link, let scope = selectedScope else { return nil }
         let revision = await refreshRevision(using: link.makeService())
         do {
@@ -848,6 +859,7 @@ public final class WatchRootModel {
     }
 
     public func send(text: String, to key: SessionKey) async -> RunKey? {
+        guard offersReplyControls else { return nil }
         guard canMutate, let link else { return nil }
         let service = link.makeService()
         let revision = await refreshRevision(using: service)
@@ -992,6 +1004,15 @@ public final class WatchRootModel {
     /// is genuinely ready: not connecting, not unreachable, and not signed out.
     public var canMutate: Bool {
         state == .ready
+    }
+
+    /// Message, voice notes, and photos. Older phones omit `writesUnsupported`,
+    /// and that still means the server accepts a reply. Listen and Stop stay.
+    public var offersReplyControls: Bool {
+        guard let selectedScope,
+              let entry = servers.first(where: { $0.scope == selectedScope })
+        else { return true }
+        return entry.writesUnsupported != true
     }
 
     /// Failures that belong to a reply control — Message, voice note, photo,
@@ -1393,6 +1414,7 @@ public final class WatchRootModel {
         }
         state = .ready
         phoneStatusNote = nil
+        discardUnusableComplicationRecording()
     }
 
     private func adopt(_ scope: ServerScope?) {

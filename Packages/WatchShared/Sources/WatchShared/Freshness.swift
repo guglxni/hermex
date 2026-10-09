@@ -58,10 +58,18 @@ public struct Freshness: Hashable, Codable, Sendable {
 public struct RegistryEntry: Hashable, Codable, Sendable {
     public let scope: ServerScope
     public let displayName: RedactedDisplayName
+    /// `true` when Message, voice notes, and photos are unavailable for this
+    /// server. Older phones omit it; omission means those writes are allowed.
+    public let writesUnsupported: Bool?
 
-    public init(scope: ServerScope, displayName: RedactedDisplayName) {
+    public init(
+        scope: ServerScope,
+        displayName: RedactedDisplayName,
+        writesUnsupported: Bool? = nil
+    ) {
         self.scope = scope
         self.displayName = displayName
+        self.writesUnsupported = writesUnsupported
     }
 }
 

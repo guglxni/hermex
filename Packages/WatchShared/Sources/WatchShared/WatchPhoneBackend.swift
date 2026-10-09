@@ -3,10 +3,13 @@ import Foundation
 public struct WatchPhoneServerAccount: Sendable, Equatable {
     public let urlString: String
     public let displayName: String
+    /// The phone refuses a watch reply for this server. Webui leaves it false.
+    public let writesUnsupported: Bool
 
-    public init(urlString: String, displayName: String) {
+    public init(urlString: String, displayName: String, writesUnsupported: Bool = false) {
         self.urlString = urlString
         self.displayName = displayName
+        self.writesUnsupported = writesUnsupported
     }
 }
 

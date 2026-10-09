@@ -20,7 +20,13 @@ struct APIClientWatchPhoneBackend: WatchPhoneBackend {
             .sorted { lhs, rhs in
                 (lhs.id == active ? 0 : 1) < (rhs.id == active ? 0 : 1)
             }
-            .map { WatchPhoneServerAccount(urlString: $0.urlString, displayName: $0.displayName) }
+            .map {
+                WatchPhoneServerAccount(
+                    urlString: $0.urlString,
+                    displayName: $0.displayName,
+                    writesUnsupported: WatchHermesRoute.writesUnsupported($0.kind)
+                )
+            }
     }
 
     func listSessions(

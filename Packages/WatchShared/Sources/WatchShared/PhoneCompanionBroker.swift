@@ -81,7 +81,8 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
                 urlByServer[server] = account.urlString
                 entries.append(RegistryEntry(
                     scope: ServerScope(epoch: epoch, server: server, generation: generation),
-                    displayName: .sanitized(account.displayName)
+                    displayName: .sanitized(account.displayName),
+                    writesUnsupported: account.writesUnsupported ? true : nil
                 ))
             }
 
@@ -961,7 +962,8 @@ public final class PhoneCompanionBroker: WatchCompanionServicing, @unchecked Sen
 
     private func registryIdentity(_ entries: [RegistryEntry]) -> [String] {
         entries.map {
-            "\($0.scope.server.rawValue.uuidString)|\($0.scope.generation.rawValue)|\($0.displayName.rawValue)"
+            let writes = $0.writesUnsupported == true ? "read-only" : "writes"
+            return "\($0.scope.server.rawValue.uuidString)|\($0.scope.generation.rawValue)|\($0.displayName.rawValue)|\(writes)"
         }
     }
 

@@ -282,7 +282,14 @@ private func semanticFreshnessScope() throws -> ServerScope {
         let encoded = try JSONEncoder().encode(value)
         let decoded = try JSONDecoder().decode(RegistryEntry.self, from: encoded)
         #expect(decoded == value)
+        #expect(decoded.writesUnsupported == nil)
         var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "writesUnsupported")
+        let omitted = try JSONDecoder().decode(RegistryEntry.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(omitted.writesUnsupported == nil)
+        object["writesUnsupported"] = true
+        let readOnly = try JSONDecoder().decode(RegistryEntry.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(readOnly.writesUnsupported == true)
         object["displayName"] = " "
         #expect(throws: WidgetValidationError.invalidDisplayName) {
             try JSONDecoder().decode(RegistryEntry.self, from: JSONSerialization.data(withJSONObject: object))

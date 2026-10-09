@@ -522,6 +522,105 @@ final class WatchRootModelTests: XCTestCase {
         XCTAssertNil(model.activeRun(for: session))
     }
 
+    func testHermesServerDoesNotOfferReplyControlsAndWebuiDoes() async throws {
+        let hermes = WatchPhoneServerAccount(
+            urlString: "https://hermes.example",
+            displayName: "Hermes",
+            writesUnsupported: true
+        )
+        let webui = WatchPhoneServerAccount(urlString: "https://webui.example", displayName: "Web")
+        let backend = RootScriptedBackend(accounts: [hermes, webui])
+        backend.sessionsByURL = [
+            "https://hermes.example": [Self.row(sessionID: "h", title: "Hermes session")],
+            "https://webui.example": [Self.row(sessionID: "w", title: "Web session")],
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+
+        XCTAssertEqual(model.servers.first?.writesUnsupported, true)
+        XCTAssertFalse(model.offersReplyControls)
+        let hermesSession = try XCTUnwrap(model.sessions.first)
+        let text = await model.send(text: "hi", to: hermesSession)
+        let voice = await model.sendVoiceNote(audio: Data([1, 2, 3]), filename: "note.m4a", to: hermesSession)
+        let photo = await model.sendPhoto(image: Data([1, 2, 3]), filename: "photo.jpg", caption: "", to: hermesSession)
+        XCTAssertNil(text)
+        XCTAssertNil(voice)
+        XCTAssertNil(photo)
+        XCTAssertNil(model.lastErrorCode)
+        model.armComplicationRecording()
+        XCTAssertNil(model.complicationRecordID)
+
+        let webScope = try XCTUnwrap(model.servers.first { $0.displayName.rawValue == "Web" }?.scope)
+        await model.select(webScope)
+        XCTAssertNil(model.servers.first { $0.scope == webScope }?.writesUnsupported)
+        XCTAssertTrue(model.offersReplyControls)
+        let webSession = try XCTUnwrap(model.nowSession)
+        let sent = await model.send(text: "hi", to: webSession)
+        XCTAssertNotNil(sent)
+        XCTAssertNil(model.lastErrorCode)
+    }
+
+    func testOmittedWriteFlagStillOffersReplyControls() throws {
+        let model = WatchRootModel()
+        let scope = Self.makeScope()
+        model.applyReadyStateForTesting(
+            servers: [RegistryEntry(scope: scope, displayName: try RedactedDisplayName("Old phone"))],
+            sessions: []
+        )
+        XCTAssertNil(model.servers.first?.writesUnsupported)
+        XCTAssertTrue(model.offersReplyControls)
+
+        model.applyReadyStateForTesting(
+            servers: [RegistryEntry(
+                scope: scope,
+                displayName: try RedactedDisplayName("Web"),
+                writesUnsupported: false
+            )],
+            sessions: []
+        )
+        XCTAssertTrue(model.offersReplyControls)
+    }
+
+    func testStaleSessionLoadDoesNotReplaceTheNewerServer() async throws {
+        let alphaAccount = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
+        let betaAccount = WatchPhoneServerAccount(urlString: "https://beta.example", displayName: "Beta")
+        let backend = RootScriptedBackend(accounts: [alphaAccount, betaAccount])
+        backend.sessionsByURL = [
+            "https://alpha.example": [Self.row(sessionID: "a", title: "Alpha session")],
+            "https://beta.example": [Self.row(sessionID: "b", title: "Beta session", runState: .responding)],
+        ]
+        let broker = PhoneCompanionBroker(epoch: InstallationEpoch(rawValue: UUID()), backend: backend)
+        let model = WatchRootModel()
+        model.attachLinkWithoutRefreshingForTesting(ScriptedLink(service: broker))
+        await model.reloadRegistryForTesting()
+        XCTAssertEqual(model.sessions.map(\.title), ["Alpha session"])
+
+        let signal = SessionLoadSignal()
+        backend.gatedSessionURL = "https://alpha.example"
+        backend.onSessionLoadEntered = { signal.arrive() }
+        let stale = Task { await model.loadSessions() }
+        await signal.wait()
+
+        let betaScope = try XCTUnwrap(model.servers.first { $0.displayName.rawValue == "Beta" }?.scope)
+        await model.select(betaScope)
+        let betaSession = try XCTUnwrap(model.nowSession)
+        let sent = await model.send(text: "go", to: betaSession)
+        let run = try XCTUnwrap(sent)
+        XCTAssertEqual(model.sessions.map(\.title), ["Beta session"])
+        XCTAssertEqual(model.activeRun(for: betaSession), run)
+
+        backend.releaseSessionLoadGate()
+        await stale.value
+
+        XCTAssertEqual(model.selectedScope, betaScope)
+        XCTAssertEqual(model.sessions.map(\.title), ["Beta session"])
+        XCTAssertEqual(model.activeRun(for: betaSession), run)
+        XCTAssertTrue(model.hasLoadedSessions)
+        XCTAssertNil(model.lastErrorCode)
+    }
+
     func testLoadSessionsKeepsMoreThanTheOldTwentyRowCap() async throws {
         let account = WatchPhoneServerAccount(urlString: "https://alpha.example", displayName: "Alpha")
         let backend = RootScriptedBackend(accounts: [account])
@@ -1101,6 +1200,34 @@ extension WatchRootModelTests {
     #endif
 }
 
+private final class SessionLoadSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var arrived = false
+
+    func arrive() {
+        lock.lock()
+        arrived = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if arrived {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+}
+
 private struct UnavailableLink: WatchCompanionLinking {
     var isCompanionAvailable: Bool { false }
     var isReachable: Bool { false }
@@ -1142,6 +1269,19 @@ private final class RootScriptedBackend: WatchPhoneBackend, @unchecked Sendable 
     var sessionsByURL: [String: [WatchPhoneSessionRow]] = [:]
     var failUpload = false
     var startedAttachments: [WatchChatAttachment]?
+    var gatedSessionURL: String?
+    var onSessionLoadEntered: (@Sendable () -> Void)?
+    private var sessionLoadGate: [CheckedContinuation<Void, Never>] = []
+    private let sessionLoadLock = NSLock()
+
+    func releaseSessionLoadGate() {
+        sessionLoadLock.lock()
+        gatedSessionURL = nil
+        let waiters = sessionLoadGate
+        sessionLoadGate = []
+        sessionLoadLock.unlock()
+        waiters.forEach { $0.resume() }
+    }
     var controlledTasks: [(jobID: String, action: String)] = []
     var skillToggles: [(name: String, enabled: Bool)] = []
     var kanbanMoves: [(cardID: String, status: String)] = []
@@ -1162,7 +1302,25 @@ private final class RootScriptedBackend: WatchPhoneBackend, @unchecked Sendable 
 
     func servers() async -> [WatchPhoneServerAccount] { accounts }
     func listSessions(urlString: String, archived: Bool, query: String?, limit: Int) async throws -> [WatchPhoneSessionRow] {
-        Array((sessionsByURL[urlString] ?? []).prefix(limit))
+        let shouldHold: Bool = {
+            sessionLoadLock.lock()
+            defer { sessionLoadLock.unlock() }
+            return gatedSessionURL == urlString
+        }()
+        if shouldHold {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                sessionLoadLock.lock()
+                if gatedSessionURL == urlString {
+                    sessionLoadGate.append(continuation)
+                    sessionLoadLock.unlock()
+                    onSessionLoadEntered?()
+                } else {
+                    sessionLoadLock.unlock()
+                    continuation.resume()
+                }
+            }
+        }
+        return Array((sessionsByURL[urlString] ?? []).prefix(limit))
     }
     func createSession(urlString: String, profileID: String?, workspace: String?) async throws -> String { "new-session" }
     func startChat(urlString: String, sessionID: String, message: String) async throws -> String { "stream-1" }

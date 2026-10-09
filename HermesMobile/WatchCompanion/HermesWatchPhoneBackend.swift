@@ -19,6 +19,9 @@ enum WatchHermesRoute {
     /// Skill toggles need `HermesSkillsClient`, which is not in this tree.
     static func togglesSkills(on kind: ServerKind) -> Bool { kind == .webui }
 
+    /// A Hermes reply uses the phone's gateway turn. The watch only reads that server.
+    static func writesUnsupported(_ kind: ServerKind) -> Bool { kind == .hermes }
+
     /// Hermes profile switches stay in `HermesProfilePreference`. `POST /api/profiles/active`
     /// would move the CLI and gateway default.
     static func remembersProfileLocally(_ kind: ServerKind) -> Bool { kind == .hermes }
